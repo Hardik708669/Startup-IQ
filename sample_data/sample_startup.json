@@ -1,0 +1,19 @@
+{
+  "startup_name": "GreenLoop Packaging",
+  "industry": "Sustainable packaging",
+  "stage": "Idea / early validation",
+  "startup_description": "A service for small retailers to explore reusable packaging options and track packaging reuse.",
+  "problem_statement": "Small retailers want to reduce single-use packaging but may lack practical reusable options and a simple way to track returns.",
+  "proposed_solution": "A pilot service combining reusable packaging, a return process, and a lightweight tracking dashboard.",
+  "target_customers": ["Independent food retailers", "Local shops", "Environmentally conscious customers"],
+  "market_assumptions": [{"claim": "Small retailers may value a simple reuse service", "status": "assumption", "evidence": "Not yet validated"}],
+  "competitors_or_alternatives": ["Single-use packaging", "Existing packaging suppliers", "Retailer-managed return schemes"],
+  "revenue_model": "Monthly service fee plus packaging replacement charges",
+  "pricing_assumptions": {"description": "Illustrative pricing requires customer interviews", "status": "unvalidated assumption"},
+  "estimated_costs": {"description": "Pilot costs may include packaging, cleaning, logistics, and software", "status": "estimate"},
+  "current_traction": {"status": "unknown", "notes": "No sales, trials, or interviews are claimed in this fictional dataset."},
+  "key_risks": ["Return participation", "Cleaning logistics", "Retailer adoption", "Packaging loss"],
+  "proposed_mitigations": ["Run a small pilot", "Measure return rates", "Interview retailers before pricing", "Define replacement process"],
+  "supporting_evidence": [],
+  "unknown_information": ["Market size", "Willingness to pay", "Return rate", "Unit economics", "Regulatory requirements"]
+}

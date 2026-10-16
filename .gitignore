@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+*.db
+*.sqlite
+*.sqlite3
+reports/
+*.html
+*.tmp
+*.log
+*.zip
+
+# Reference assets kept locally but excluded from the first commit.
+/Deconstructing_Startup_IQ.mp4
+/Startup_IQ_Project_Concept_and_Implementation_Blueprint.docx
