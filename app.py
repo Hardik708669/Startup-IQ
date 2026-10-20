@@ -3,11 +3,22 @@
 import streamlit as st
 
 from intake import split_lines, validate_submission
+from assessment import EVIDENCE_STATUSES, get_dimension_question, validate_assessment_entries
+from scoring import DIMENSIONS, calculate_assessment
 
 st.set_page_config(page_title="Startup IQ | Startup Intake", page_icon="📊", layout="wide")
 st.title("Startup IQ")
 st.subheader("An analytical indicator, not a magic prediction.")
 st.write("Complete this structured profile before assessment. Claims, estimates, and unknowns are kept distinct; no score is calculated at this stage.")
+
+if "startup_profile" not in st.session_state:
+    st.session_state.startup_profile = None
+if "assessment_entries" not in st.session_state:
+    st.session_state.assessment_entries = None
+if "assessment_result" not in st.session_state:
+    st.session_state.assessment_result = None
+if "assessment_view" not in st.session_state:
+    st.session_state.assessment_view = False
 
 
 def field(label: str, key: str, *, help_text: str | None = None) -> str:
@@ -149,6 +160,9 @@ if submitted:
         for error in errors:
             st.write(f"- {error}")
     else:
+        st.session_state.startup_profile = submission
+        st.session_state.assessment_result = None
+        st.session_state.assessment_view = False
         st.success("Startup profile received for review.")
         st.markdown("## Submission summary")
         st.caption("This is an intake summary only. No score or recommendation has been generated.")
@@ -200,3 +214,68 @@ if submitted:
             render_summary_field("Evidence records", submission["evidence_records"])
             st.markdown(f"**Unknown information count:** {len(submission['unknown_information'])}")
             render_summary_field("Information not yet known", submission["unknown_information"])
+
+
+if st.session_state.startup_profile is not None:
+    st.markdown("---")
+    profile = st.session_state.startup_profile
+    if not st.session_state.assessment_view:
+        st.markdown("## Continue to assessment")
+        st.write(f"Your validated profile for **{profile['startup_name']}** is stored for this session. Review it above, then continue when ready.")
+        if st.button("Continue to seven-dimension assessment", type="primary"):
+            st.session_state.assessment_view = True
+            st.rerun()
+    else:
+        st.markdown("## Seven-dimension assessment")
+        st.write("Rate each dimension from 0 to 100 and explain the rating. This step collects assessment inputs only; it does not calculate a final score.")
+        st.info("A missing evidence rationale is not converted into a zero. Select ‘Not yet known’ when information is unavailable and explain the gap. Confirm each rating only after reviewing it.")
+        with st.form("assessment_form"):
+            assessment_entries = {}
+            for dimension in DIMENSIONS:
+                st.markdown(f"### {dimension.name} — {dimension.weight}%")
+                st.caption(get_dimension_question(dimension.identifier))
+                rating = st.slider(
+                    f"{dimension.name} rating",
+                    min_value=0,
+                    max_value=100,
+                    value=50,
+                    key=f"rating_{dimension.identifier}",
+                )
+                reviewed = st.checkbox(
+                    "I reviewed this rating and it reflects the current information",
+                    key=f"reviewed_{dimension.identifier}",
+                )
+                evidence_status = st.selectbox(
+                    "Information status",
+                    EVIDENCE_STATUSES,
+                    key=f"status_{dimension.identifier}",
+                )
+                rationale = st.text_area(
+                    "Supporting rationale or evidence",
+                    key=f"rationale_{dimension.identifier}",
+                    height=100,
+                    help="Describe the basis for the rating. State what is supported, estimated, hypothesized, or not yet known.",
+                )
+                assessment_entries[dimension.identifier] = {
+                    "rating": rating,
+                    "reviewed": reviewed,
+                    "evidence_status": evidence_status,
+                    "rationale": rationale,
+                }
+            assessment_submitted = st.form_submit_button("Save assessment inputs", type="primary", use_container_width=True)
+
+        if assessment_submitted:
+            errors = validate_assessment_entries(assessment_entries)
+            if errors:
+                st.error("Please complete the assessment inputs:")
+                for error in errors:
+                    st.write(f"- {error}")
+            else:
+                st.session_state.assessment_entries = assessment_entries
+                st.session_state.assessment_result = calculate_assessment(assessment_entries)
+                st.success("Assessment inputs saved and scored deterministically for this session.")
+                st.caption(f"Overall score: {st.session_state.assessment_result.overall_score:.2f} / 100. Detailed results will be expanded in the results dashboard task.")
+
+        if st.button("Return to profile review"):
+            st.session_state.assessment_view = False
+            st.rerun()
