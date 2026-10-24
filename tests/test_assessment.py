@@ -1,6 +1,6 @@
 """Tests for Day 3 assessment input helpers."""
 
-from assessment import EVIDENCE_STATUSES, validate_assessment_entries
+from assessment import EVIDENCE_STATUSES, reset_assessment_state, validate_assessment_entries
 from scoring import DIMENSIONS
 
 
@@ -47,3 +47,25 @@ def test_rating_range_is_validated():
     entries = complete_entries()
     entries[DIMENSIONS[0].identifier]["rating"] = 101
     assert "Market Potential rating must be between 0 and 100." in validate_assessment_entries(entries)
+
+
+def test_reset_assessment_state_removes_previous_startup_inputs_and_result():
+    state = {
+        "assessment_entries": {"market_potential": {"rating": 88}},
+        "assessment_result": "old-result",
+        "assessment_date": "2026-10-20",
+        "dashboard_view": True,
+        "rating_market_potential": 88,
+        "reviewed_market_potential": True,
+        "status_market_potential": "Supported information",
+        "rationale_market_potential": "Old startup rationale",
+        "unrelated_state": "preserve",
+    }
+    reset_assessment_state(state)
+    assert state["assessment_entries"] is None
+    assert state["assessment_result"] is None
+    assert state["assessment_date"] is None
+    assert state["dashboard_view"] is False
+    assert "rating_market_potential" not in state
+    assert "rationale_market_potential" not in state
+    assert state["unrelated_state"] == "preserve"

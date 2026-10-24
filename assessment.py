@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, MutableMapping
 
 from scoring import DIMENSIONS
 
@@ -19,6 +19,18 @@ DIMENSION_QUESTIONS = {
 
 # Put the conservative state first so an untouched control cannot imply support.
 EVIDENCE_STATUSES = ("Not yet known", "Supported information", "Estimate", "Unvalidated hypothesis")
+ASSESSMENT_STATE_PREFIXES = ("rating_", "reviewed_", "status_", "rationale_")
+
+
+def reset_assessment_state(state: MutableMapping[str, Any]) -> None:
+    """Clear assessment inputs so a new startup cannot inherit prior answers."""
+    state["assessment_entries"] = None
+    state["assessment_result"] = None
+    state["assessment_date"] = None
+    state["dashboard_view"] = False
+    for key in list(state):
+        if key.startswith(ASSESSMENT_STATE_PREFIXES):
+            del state[key]
 
 
 def get_dimension_question(identifier: str) -> str:

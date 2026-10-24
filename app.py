@@ -1,10 +1,14 @@
-"""Startup IQ Day 2 startup information intake interface."""
+"""Startup IQ intake, assessment, and results dashboard interface."""
 
+from datetime import date
+
+import plotly.graph_objects as go
 import streamlit as st
 
 from intake import split_lines, validate_submission
-from assessment import EVIDENCE_STATUSES, get_dimension_question, validate_assessment_entries
+from assessment import EVIDENCE_STATUSES, get_dimension_question, reset_assessment_state, validate_assessment_entries
 from scoring import DIMENSIONS, calculate_assessment
+from dashboard import DISCLAIMER, dimension_rows, evidence_status_counts
 
 st.set_page_config(page_title="Startup IQ | Startup Intake", page_icon="📊", layout="wide")
 st.title("Startup IQ")
@@ -19,6 +23,10 @@ if "assessment_result" not in st.session_state:
     st.session_state.assessment_result = None
 if "assessment_view" not in st.session_state:
     st.session_state.assessment_view = False
+if "dashboard_view" not in st.session_state:
+    st.session_state.dashboard_view = False
+if "assessment_date" not in st.session_state:
+    st.session_state.assessment_date = None
 
 
 def field(label: str, key: str, *, help_text: str | None = None) -> str:
@@ -161,7 +169,7 @@ if submitted:
             st.write(f"- {error}")
     else:
         st.session_state.startup_profile = submission
-        st.session_state.assessment_result = None
+        reset_assessment_state(st.session_state)
         st.session_state.assessment_view = False
         st.success("Startup profile received for review.")
         st.markdown("## Submission summary")
@@ -225,7 +233,7 @@ if st.session_state.startup_profile is not None:
         if st.button("Continue to seven-dimension assessment", type="primary"):
             st.session_state.assessment_view = True
             st.rerun()
-    else:
+    elif not st.session_state.dashboard_view:
         st.markdown("## Seven-dimension assessment")
         st.write("Rate each dimension from 0 to 100 and explain the rating. This step collects assessment inputs only; it does not calculate a final score.")
         st.info("A missing evidence rationale is not converted into a zero. Select ‘Not yet known’ when information is unavailable and explain the gap. Confirm each rating only after reviewing it.")
@@ -273,9 +281,73 @@ if st.session_state.startup_profile is not None:
             else:
                 st.session_state.assessment_entries = assessment_entries
                 st.session_state.assessment_result = calculate_assessment(assessment_entries)
+                st.session_state.assessment_date = date.today().isoformat()
+                st.session_state.dashboard_view = True
                 st.success("Assessment inputs saved and scored deterministically for this session.")
-                st.caption(f"Overall score: {st.session_state.assessment_result.overall_score:.2f} / 100. Detailed results will be expanded in the results dashboard task.")
+                st.rerun()
 
         if st.button("Return to profile review"):
             st.session_state.assessment_view = False
             st.rerun()
+    else:
+        result = st.session_state.assessment_result
+        if result is None:
+            st.session_state.dashboard_view = False
+            st.warning("Complete and save a valid assessment before viewing results.")
+        else:
+            rows = dimension_rows(result)
+            st.markdown("## Assessment results")
+            st.caption("This dashboard displays the current deterministic assessment result; it does not predict business success.")
+            profile_cols = st.columns(3)
+            profile_cols[0].metric("Startup", profile["startup_name"])
+            profile_cols[1].metric("Stage", profile.get("stage") or "Not provided")
+            profile_cols[2].metric("Overall readiness", f"{result.overall_score:.2f} / 100")
+            st.info("Assessment indicator only — a high score does not guarantee success, funding, profitability, or investment returns.")
+
+            st.markdown("### Dimension ratings")
+            chart = go.Figure(go.Bar(
+                x=[row["rating"] for row in rows],
+                y=[row["dimension"] for row in rows],
+                orientation="h",
+                text=[f"{row['rating']}/100" for row in rows],
+                textposition="outside",
+                marker_color="#2E7D9A",
+            ))
+            chart.update_layout(
+                title="Ratings by assessment dimension",
+                xaxis={"title": "Rating", "range": [0, 100]},
+                yaxis={"title": "", "autorange": "reversed"},
+                height=430,
+                margin={"l": 10, "r": 55, "t": 65, "b": 45},
+            )
+            st.plotly_chart(chart, use_container_width=True)
+
+            st.markdown("### Dimension breakdown")
+            for row in rows:
+                with st.expander(f"{row['dimension']} — {row['rating']}/100 | {row['weight']}% weight | {row['contribution']:.2f} contribution", expanded=True):
+                    detail_cols = st.columns(3)
+                    detail_cols[0].markdown(f"**Evidence status:** {row['evidence_status']}")
+                    detail_cols[1].markdown(f"**Weighted contribution:** {row['contribution']:.2f}")
+                    detail_cols[2].markdown(f"**Evidence gap:** {'Yes' if row['missing_evidence'] else 'No'}")
+                    st.markdown(f"**Supporting rationale:** {row['rationale'] or 'Not provided'}")
+                    if row["missing_evidence"]:
+                        st.warning("Supporting evidence is limited or not yet known. This flag is separate from the numeric rating.")
+
+            st.markdown("### Evidence status")
+            counts = evidence_status_counts(result)
+            for status in EVIDENCE_STATUSES:
+                st.write(f"- **{status}:** {counts.get(status, 0)} dimension(s)")
+            st.caption("These are status counts, not a scientifically validated evidence-coverage percentage.")
+
+            with st.expander("Assessment details", expanded=False):
+                st.write(f"**Startup name:** {profile.get('startup_name') or 'Not provided'}")
+                st.write(f"**Industry:** {profile.get('industry') or 'Not provided'}")
+                st.write(f"**Startup stage:** {profile.get('stage') or 'Not provided'}")
+                st.write(f"**Assessment date:** {st.session_state.assessment_date or 'Not provided'}")
+                st.write(f"**Rubric version:** {result.rubric_version}")
+                st.write(f"**Assessment dimensions:** {len(result.dimensions)}")
+
+            st.warning(DISCLAIMER)
+            if st.button("Return to assessment inputs"):
+                st.session_state.dashboard_view = False
+                st.rerun()
