@@ -10,6 +10,7 @@ from assessment import EVIDENCE_STATUSES, get_dimension_question, reset_assessme
 from scoring import DIMENSIONS, calculate_assessment
 from dashboard import DISCLAIMER, dimension_rows, evidence_status_counts
 from recommendations import generate_recommendations
+from report_generator import generate_report, report_filename
 
 st.set_page_config(page_title="Startup IQ | Startup Intake", page_icon="📊", layout="wide")
 st.title("Startup IQ")
@@ -352,8 +353,21 @@ if st.session_state.startup_profile is not None:
                 st.write(f"**Assessment dimensions:** {len(result.dimensions)}")
 
             st.warning(DISCLAIMER)
-            st.markdown("### Rule-based recommendations")
             recommendations = st.session_state.recommendations or ()
+            report_html = generate_report(
+                profile,
+                result,
+                recommendations,
+                st.session_state.assessment_date,
+            )
+            st.download_button(
+                "Download Assessment Report",
+                data=report_html,
+                file_name=report_filename(profile.get("startup_name", "startup"), st.session_state.assessment_date or "assessment"),
+                mime="text/html",
+                use_container_width=True,
+            )
+            st.markdown("### Rule-based recommendations")
             if not recommendations:
                 st.success("No high-priority actions were generated for this assessment. Continue reviewing assumptions and evidence as the startup develops.")
             else:
