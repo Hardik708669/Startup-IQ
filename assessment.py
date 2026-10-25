@@ -27,6 +27,7 @@ def reset_assessment_state(state: MutableMapping[str, Any]) -> None:
     state["assessment_entries"] = None
     state["assessment_result"] = None
     state["recommendations"] = None
+    state["saved_assessment_id"] = None
     state["assessment_date"] = None
     state["dashboard_view"] = False
     for key in list(state):

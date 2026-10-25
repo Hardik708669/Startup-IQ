@@ -11,11 +11,19 @@ from scoring import DIMENSIONS, calculate_assessment
 from dashboard import DISCLAIMER, dimension_rows, evidence_status_counts
 from recommendations import generate_recommendations
 from report_generator import generate_report, report_filename
+from database import DEFAULT_DB_PATH, get_assessment, initialize_database, list_assessments, save_assessment
 
 st.set_page_config(page_title="Startup IQ | Startup Intake", page_icon="📊", layout="wide")
 st.title("Startup IQ")
 st.subheader("An analytical indicator, not a magic prediction.")
 st.write("Complete this structured profile before assessment. Claims, estimates, and unknowns are kept distinct; no score is calculated at this stage.")
+
+try:
+    initialize_database()
+    database_error = None
+except Exception as error:
+    database_error = str(error)
+    st.warning("Local assessment history is unavailable in this session. Current in-memory assessment features remain available.")
 
 if "startup_profile" not in st.session_state:
     st.session_state.startup_profile = None
@@ -31,6 +39,8 @@ if "dashboard_view" not in st.session_state:
     st.session_state.dashboard_view = False
 if "assessment_date" not in st.session_state:
     st.session_state.assessment_date = None
+if "saved_assessment_id" not in st.session_state:
+    st.session_state.saved_assessment_id = None
 
 
 def field(label: str, key: str, *, help_text: str | None = None) -> str:
@@ -287,6 +297,20 @@ if st.session_state.startup_profile is not None:
                 st.session_state.assessment_result = calculate_assessment(assessment_entries)
                 st.session_state.recommendations = generate_recommendations(st.session_state.assessment_result)
                 st.session_state.assessment_date = date.today().isoformat()
+                if database_error is None:
+                    try:
+                        st.session_state.saved_assessment_id = save_assessment(
+                            profile,
+                            assessment_entries,
+                            st.session_state.assessment_result,
+                            st.session_state.recommendations,
+                            st.session_state.assessment_date,
+                        )
+                    except Exception as error:
+                        st.session_state.saved_assessment_id = None
+                        st.error(f"Assessment was calculated but could not be saved to local history: {error}")
+                    else:
+                        st.success(f"Assessment saved to local history (ID {st.session_state.saved_assessment_id}).")
                 st.session_state.dashboard_view = True
                 st.success("Assessment inputs saved and scored deterministically for this session.")
                 st.rerun()
@@ -382,3 +406,66 @@ if st.session_state.startup_profile is not None:
             if st.button("Return to assessment inputs"):
                 st.session_state.dashboard_view = False
                 st.rerun()
+
+
+def render_historical_assessment(record: dict[str, object]) -> None:
+    """Display an immutable saved assessment without changing active session state."""
+    historical_result = record["result"]
+    historical_profile = record["profile"]
+    historical_recommendations = record["recommendations"]
+    st.markdown("## Historical assessment")
+    st.info("This is a saved historical snapshot. Selecting it does not overwrite the currently active assessment.")
+    columns = st.columns(3)
+    columns[0].metric("Assessment ID", record["id"])
+    columns[1].metric("Startup", historical_profile.get("startup_name", "Not provided"))
+    columns[2].metric("Overall score", f"{historical_result.overall_score:.2f} / 100")
+    st.write(f"**Assessment date:** {record.get('assessment_date') or 'Not provided'}")
+    st.write(f"**Rubric version:** {historical_result.rubric_version}")
+    for item in historical_result.dimensions:
+        with st.expander(f"{item.name} — {item.rating}/100 | {item.contribution:.2f} contribution"):
+            st.write(f"**Weight:** {item.weight}%")
+            st.write(f"**Evidence status:** {item.evidence_status}")
+            st.write(f"**Missing evidence:** {'Yes' if item.missing_evidence else 'No'}")
+            st.write(f"**Rationale:** {item.rationale or 'Not provided'}")
+    st.markdown("### Saved recommendations")
+    if not historical_recommendations:
+        st.write("No recommendations were saved for this assessment.")
+    for recommendation in historical_recommendations:
+        st.markdown(f"- **{recommendation.priority} — {recommendation.dimension}:** {recommendation.recommended_action}")
+    historical_html = generate_report(
+        historical_profile,
+        historical_result,
+        historical_recommendations,
+        record.get("assessment_date"),
+    )
+    st.download_button(
+        "Download Historical Assessment Report",
+        data=historical_html,
+        file_name=report_filename(historical_profile.get("startup_name", "startup"), record.get("assessment_date") or "assessment"),
+        mime="text/html",
+        key=f"historical_report_{record['id']}",
+    )
+
+
+if database_error is None:
+    try:
+        history = list_assessments()
+    except Exception as error:
+        history = []
+        st.sidebar.error(f"Assessment history could not be loaded: {error}")
+    st.sidebar.markdown("### Assessment history")
+    if not history:
+        st.sidebar.caption("No saved assessments yet. Complete an assessment to create the first history record.")
+    else:
+        history_options = [None] + [item["id"] for item in history]
+        selected_history_id = st.sidebar.selectbox(
+            "Open a saved assessment",
+            history_options,
+            format_func=lambda assessment_id: "Select an assessment" if assessment_id is None else next(
+                f"#{item['id']} — {item['startup_name'] or 'Unnamed'} — {item['overall_score']:.2f}/100" for item in history if item["id"] == assessment_id
+            ),
+        )
+        if selected_history_id is not None:
+            historical_record = get_assessment(selected_history_id)
+            if historical_record is not None:
+                render_historical_assessment(historical_record)
