@@ -26,6 +26,7 @@ def reset_assessment_state(state: MutableMapping[str, Any]) -> None:
     """Clear assessment inputs so a new startup cannot inherit prior answers."""
     state["assessment_entries"] = None
     state["assessment_result"] = None
+    state["recommendations"] = None
     state["assessment_date"] = None
     state["dashboard_view"] = False
     for key in list(state):

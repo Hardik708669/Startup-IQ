@@ -64,6 +64,7 @@ def test_reset_assessment_state_removes_previous_startup_inputs_and_result():
     reset_assessment_state(state)
     assert state["assessment_entries"] is None
     assert state["assessment_result"] is None
+    assert state["recommendations"] is None
     assert state["assessment_date"] is None
     assert state["dashboard_view"] is False
     assert "rating_market_potential" not in state

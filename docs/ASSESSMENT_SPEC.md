@@ -37,3 +37,9 @@ Basic information: startup name, industry, stage, short description. Problem and
 
 Evidence records will contain a title/description, related dimension, source name or URL, date, status, and notes. Claims must be clearly distinguished from verified evidence. Founders may mark information as unknown; idea-stage startups are not required to have traction.
 
+## Rule-based recommendations
+
+The recommendation engine uses the deterministic assessment result, rating thresholds, evidence status, and missing-evidence flags. Ratings below 60 receive high-priority improvement guidance. Ratings from 60 through 79 receive refinement guidance. Ratings of 80 or above do not produce an unnecessary warning when supporting information is available, but weak evidence still produces a validation action. A low rating combined with weak evidence produces one combined recommendation rather than contradictory messages.
+
+Recommendations identify the related dimension, priority, issue, explanation, recommended action, suggested evidence or validation method, and reason. They ask the founder to obtain missing information and never invent customer research, market statistics, sales, financial results, or external sources. These are transparent rule-based prompts, not scientifically validated predictions or AI-generated conclusions.
+

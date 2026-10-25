@@ -9,6 +9,7 @@ from intake import split_lines, validate_submission
 from assessment import EVIDENCE_STATUSES, get_dimension_question, reset_assessment_state, validate_assessment_entries
 from scoring import DIMENSIONS, calculate_assessment
 from dashboard import DISCLAIMER, dimension_rows, evidence_status_counts
+from recommendations import generate_recommendations
 
 st.set_page_config(page_title="Startup IQ | Startup Intake", page_icon="📊", layout="wide")
 st.title("Startup IQ")
@@ -21,6 +22,8 @@ if "assessment_entries" not in st.session_state:
     st.session_state.assessment_entries = None
 if "assessment_result" not in st.session_state:
     st.session_state.assessment_result = None
+if "recommendations" not in st.session_state:
+    st.session_state.recommendations = None
 if "assessment_view" not in st.session_state:
     st.session_state.assessment_view = False
 if "dashboard_view" not in st.session_state:
@@ -281,6 +284,7 @@ if st.session_state.startup_profile is not None:
             else:
                 st.session_state.assessment_entries = assessment_entries
                 st.session_state.assessment_result = calculate_assessment(assessment_entries)
+                st.session_state.recommendations = generate_recommendations(st.session_state.assessment_result)
                 st.session_state.assessment_date = date.today().isoformat()
                 st.session_state.dashboard_view = True
                 st.success("Assessment inputs saved and scored deterministically for this session.")
@@ -348,6 +352,19 @@ if st.session_state.startup_profile is not None:
                 st.write(f"**Assessment dimensions:** {len(result.dimensions)}")
 
             st.warning(DISCLAIMER)
+            st.markdown("### Rule-based recommendations")
+            recommendations = st.session_state.recommendations or ()
+            if not recommendations:
+                st.success("No high-priority actions were generated for this assessment. Continue reviewing assumptions and evidence as the startup develops.")
+            else:
+                st.caption("These recommendations are deterministic rules based on the current ratings and evidence statuses. They are not AI-generated advice.")
+                for recommendation in recommendations:
+                    with st.expander(f"{recommendation.priority} priority — {recommendation.dimension}", expanded=True):
+                        st.markdown(f"**Issue:** {recommendation.issue}")
+                        st.markdown(f"**Explanation:** {recommendation.explanation}")
+                        st.markdown(f"**Recommended next action:** {recommendation.recommended_action}")
+                        st.markdown(f"**Suggested evidence or validation:** {recommendation.suggested_evidence}")
+                        st.markdown(f"**Reason:** {recommendation.reason}")
             if st.button("Return to assessment inputs"):
                 st.session_state.dashboard_view = False
                 st.rerun()
