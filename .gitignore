@@ -11,6 +11,8 @@ data/
 *.db-wal
 reports/
 *.html
+*.docx
+*.pptx
 *.tmp
 *.log
 *.zip

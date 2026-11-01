@@ -1,0 +1,181 @@
+"""Automated tests for AI-powered startup idea understanding and structured extraction."""
+
+import json
+import os
+import unittest.mock as mock
+import pytest
+
+from ai_service import (
+    AnalysisResult,
+    ExtractedField,
+    MissingInfoItem,
+    SuggestedEvidence,
+    STATUS_APPROVED,
+    STATUS_EDITED,
+    STATUS_PENDING,
+    STATUS_REJECTED,
+    analyze_startup_idea,
+    heuristic_extract_startup_idea,
+    parse_ai_json_response,
+)
+from database import ensure_startup, get_evidence, initialize_database, list_evidence, save_evidence
+
+
+def sample_startup_text():
+    return (
+        "We are building NeuroSync, an AI diagnostic headband for epilepsy patients and neurology clinics. "
+        "The problem is that seizure onset is unpredictable and 50 million people suffer without early warning. "
+        "Our solution uses edge EEG sensors with real-time predictive alerts. "
+        "We interviewed 30 neurology clinics and 15 expressed interest in our $150/month SaaS subscription. "
+        "Direct competitors include Empatica and Seer Medical. "
+        "We need $500,000 for clinical trials and hardware certification."
+    )
+
+
+def test_heuristic_extraction_valid_text():
+    text = sample_startup_text()
+    res = heuristic_extract_startup_idea(text)
+    assert res.provider_used == "heuristic"
+    assert len(res.fields) == 25
+
+    fields_by_key = {f.field_key: f for f in res.fields}
+    assert "NeuroSync" in fields_by_key["startup_name"].suggested_value
+    assert fields_by_key["industry"].suggested_value in ("HealthTech", "Artificial Intelligence", "Technology")
+    assert fields_by_key["problem_statement"].suggested_value != ""
+    assert fields_by_key["proposed_solution"].suggested_value != ""
+    assert fields_by_key["revenue_model"].suggested_value != ""
+    assert len(res.suggested_evidence) >= 1
+    assert "Interview" in res.suggested_evidence[0].evidence_title
+
+
+def test_empty_or_oversized_text():
+    res, err = analyze_startup_idea("")
+    assert err == "Startup description cannot be empty."
+    assert len(res.fields) == 0
+
+    res2, err2 = analyze_startup_idea("   ")
+    assert err2 == "Startup description cannot be empty."
+
+    oversized = "a" * 25001
+    res3, err3 = analyze_startup_idea(oversized)
+    assert "exceeds maximum character limit" in err3
+
+
+def test_missing_information_detection():
+    # Text with missing financial and competitor details
+    bare_text = "We have an idea called PetSocial for dog owners to meet up in parks."
+    res = heuristic_extract_startup_idea(bare_text)
+    missing_keys = [m.dimension for m in res.missing_info]
+    assert "Competitive Position" in missing_keys or "Business Model" in missing_keys or "Financial Readiness" in missing_keys
+    for item in res.missing_info:
+        assert item.missing_information
+        assert item.why_it_matters
+        assert item.suggested_question
+        assert item.suggested_evidence
+
+
+def test_directly_stated_vs_inferred():
+    text = "We are building PayFlow for freelancers to handle invoices."
+    res = heuristic_extract_startup_idea(text)
+    fields_by_key = {f.field_key: f for f in res.fields}
+    assert fields_by_key["startup_name"].is_inferred is False
+    assert fields_by_key["startup_name"].supporting_text != ""
+
+
+def test_parse_ai_json_response_success():
+    mock_payload = {
+        "fields": {
+            "startup_name": {"value": "CloudGuard", "supporting_text": "CloudGuard", "is_inferred": False},
+            "industry": {"value": "Cybersecurity", "supporting_text": "cloud security", "is_inferred": False},
+            "stage": {"value": "Seed", "supporting_text": "Seed round", "is_inferred": False},
+            "problem_statement": {"value": "Cloud misconfigurations cause data breaches.", "supporting_text": "misconfigurations", "is_inferred": False},
+            "proposed_solution": {"value": "Automated posture management.", "supporting_text": "posture management", "is_inferred": False},
+            "target_customers": {"value": "DevOps teams", "supporting_text": "DevOps", "is_inferred": False},
+        },
+        "missing_info": [
+            {
+                "section": "Financial and operational information",
+                "dimension": "Financial Readiness",
+                "missing_information": "Pricing is not defined.",
+                "why_it_matters": "Cannot calculate LTV.",
+                "suggested_question": "What is the monthly seat fee?",
+                "suggested_evidence": "Pricing survey.",
+            }
+        ],
+        "suggested_evidence": [
+            {
+                "evidence_title": "20 DevOps Pilot Trials",
+                "evidence_description": "20 companies tested beta.",
+                "evidence_type": "Pilot results",
+                "related_dimension": "Problem & Solution Clarity",
+                "source_name": "Founder statement",
+                "verification_status": "Founder submitted",
+                "supporting_excerpt": "20 companies tested beta",
+            }
+        ]
+    }
+    json_str = f"```json\n{json.dumps(mock_payload)}\n```"
+    result = parse_ai_json_response(json_str, provider_name="openai")
+    assert result.provider_used == "openai"
+    assert len(result.fields) == 25
+    field_dict = {f.field_key: f for f in result.fields}
+    assert field_dict["startup_name"].suggested_value == "CloudGuard"
+    assert field_dict["industry"].suggested_value == "Cybersecurity"
+    assert len(result.missing_info) == 1
+    assert result.missing_info[0].dimension == "Financial Readiness"
+    assert len(result.suggested_evidence) == 1
+    assert result.suggested_evidence[0].evidence_title == "20 DevOps Pilot Trials"
+
+
+def test_malformed_and_incomplete_ai_json():
+    with pytest.raises(Exception):
+        parse_ai_json_response("{not-valid-json}")
+
+    with pytest.raises(ValueError, match="not a valid JSON dictionary"):
+        parse_ai_json_response('["array", "not", "dict"]')
+
+
+def test_ai_provider_network_and_timeout_fallbacks():
+    # When an external network/API call fails or times out, it must fall back to heuristic without crashing
+    text = sample_startup_text()
+    with mock.patch("urllib.request.urlopen", side_effect=TimeoutError("Request timed out")):
+        res, err = analyze_startup_idea(text, api_key="test-key", provider="openai")
+        assert res.provider_used == "heuristic"
+        assert "timed out" in err
+        assert len(res.fields) == 25
+
+    with mock.patch("urllib.request.urlopen", side_effect=Exception("API connection failure")):
+        res, err = analyze_startup_idea(text, api_key="AIzaSyTestGeminiKey", provider="gemini")
+        assert res.provider_used == "heuristic"
+        assert "fallback" in err
+
+
+def test_evidence_suggestions_integration_with_db(tmp_path):
+    path = tmp_path / "test_ai_evidence.db"
+    initialize_database(path)
+    profile = {"startup_name": "NeuroSync", "industry": "HealthTech", "stage": "Idea"}
+    ensure_startup(profile, path)
+
+    evidence_item = SuggestedEvidence(
+        evidence_title="Founder Clinical Interview Notes",
+        evidence_description="Interviewed 30 neurology clinics.",
+        evidence_type="Customer interviews",
+        related_dimension="Problem & Solution Clarity",
+        source_name="Founder statement",
+        verification_status="Founder submitted",
+        supporting_excerpt="Interviewed 30 neurology clinics",
+        is_approved=True,
+    )
+
+    ev_id = save_evidence(profile, evidence_item.as_dict(), path)
+    saved = get_evidence(ev_id, path)
+    assert saved is not None
+    assert saved["evidence_title"] == "Founder Clinical Interview Notes"
+    assert saved["verification_status"] == "Founder submitted"
+    assert saved["evidence_type"] == "Customer interviews"
+
+    # Listed under startup
+    listed = list_evidence(profile, path=path)
+    assert len(listed) == 1
+    assert listed[0]["evidence_id"] == ev_id
+

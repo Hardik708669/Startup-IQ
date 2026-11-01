@@ -1,6 +1,7 @@
 """Startup IQ intake, assessment, and results dashboard interface."""
 
 from datetime import date
+from typing import Any
 
 import plotly.graph_objects as go
 import streamlit as st
@@ -11,9 +12,21 @@ from scoring import DIMENSIONS, calculate_assessment
 from dashboard import DISCLAIMER, dimension_rows, evidence_status_counts
 from recommendations import generate_recommendations
 from report_generator import generate_report, report_filename
-from database import (DEFAULT_DB_PATH, EVIDENCE_TYPES, VERIFICATION_STATUSES, archive_evidence,
-                       ensure_startup, get_assessment, initialize_database, list_evidence, list_assessments,
-                       save_assessment, save_evidence, store_attachment, update_evidence)
+from ai_service import (
+    EXTRACTION_SECTIONS, STATUS_APPROVED, STATUS_EDITED, STATUS_PENDING, STATUS_REJECTED,
+    analyze_startup_idea,
+)
+from business_plan_generator import (
+    BUSINESS_PLAN_SECTIONS, create_business_plan_docx, draft_business_plan_content,
+)
+from pitch_deck_generator import (
+    PITCH_DECK_SLIDES, create_pitch_deck_pptx, draft_pitch_deck_slides,
+)
+from database import (DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR, EVIDENCE_TYPES, VERIFICATION_STATUSES,
+                       archive_evidence, ensure_startup, get_assessment, get_generated_document,
+                       initialize_database, list_evidence, list_assessments, list_generated_documents,
+                       save_assessment, save_evidence, save_generated_document, store_attachment,
+                       update_evidence)
 
 st.set_page_config(page_title="Startup IQ | Startup Intake", page_icon="📊", layout="wide")
 st.title("Startup IQ")
@@ -43,25 +56,154 @@ if "assessment_date" not in st.session_state:
     st.session_state.assessment_date = None
 if "saved_assessment_id" not in st.session_state:
     st.session_state.saved_assessment_id = None
+if "ai_analysis_result" not in st.session_state:
+    st.session_state.ai_analysis_result = None
+if "profile_defaults" not in st.session_state:
+    st.session_state.profile_defaults = {}
 
 
 def field(label: str, key: str, *, help_text: str | None = None) -> str:
     """Render a consistent text area for longer intake responses."""
-    return st.text_area(label, key=key, help=help_text, height=90)
+    default_val = st.session_state.profile_defaults.get(key, "")
+    return st.text_area(label, value=default_val, key=key, help=help_text, height=90)
+
+
+# -------------------------------------------------------------
+# AI-Powered Idea Analysis & Extraction Container
+# -------------------------------------------------------------
+st.markdown("## ✨ AI Startup Idea Understanding & Structured Extraction (Optional)")
+st.caption("Paste your startup idea in plain, natural language. The AI assistant extracts structured candidate information, detects missing details, and surfaces validation evidence claims for your review. No field is saved without your explicit approval.")
+ai_raw_input = st.text_area(
+    "Describe your startup idea in natural language",
+    key="ai_raw_idea_input",
+    height=120,
+    placeholder="e.g. We are building MediScan, an AI diagnostic system for emergency radiologists. Emergency departments suffer from a 4-hour delay in triage..."
+)
+col_ai1, col_ai2 = st.columns([1, 4])
+with col_ai1:
+    analyze_clicked = st.button("AI Analyse", type="secondary", use_container_width=True)
+if analyze_clicked:
+    if not ai_raw_input.strip():
+        st.error("Please enter a startup description before running AI analysis.")
+    else:
+        with st.spinner("Analyzing startup idea and extracting structured fields..."):
+            analysis_res, ai_err = analyze_startup_idea(ai_raw_input)
+            st.session_state.ai_analysis_result = analysis_res
+            if ai_err:
+                st.warning(ai_err)
+            else:
+                st.success(f"Analysis completed using {analysis_res.provider_used} engine! Review suggested values below.")
+
+if st.session_state.ai_analysis_result is not None:
+    analysis: Any = st.session_state.ai_analysis_result
+    st.markdown("### Review & Confirm AI Suggestions")
+    st.info("Review candidate values below. You can approve, edit, or reject each suggestion before applying them to your intake form.")
+
+    # Group by sections
+    for sec in EXTRACTION_SECTIONS:
+        sec_fields = [f for f in analysis.fields if f.section == sec and f.suggested_value]
+        if sec_fields:
+            st.markdown(f"#### {sec}")
+            for item in sec_fields:
+                with st.container():
+                    c_val, c_status, c_act = st.columns([3, 1, 1])
+                    with c_val:
+                        edited_val = st.text_input(
+                            f"{item.display_label} (Excerpt: {item.supporting_text[:40] + '...' if item.supporting_text else 'Inferred'})",
+                            value=item.suggested_value,
+                            key=f"ai_field_{item.field_key}"
+                        )
+                        if edited_val != item.suggested_value:
+                            item.suggested_value = edited_val
+                            item.confirmation_status = STATUS_EDITED
+                    with c_status:
+                        st.caption(f"Status: `{item.confirmation_status}`")
+                        st.caption(f"{'Inferred' if item.is_inferred else 'Directly stated'}")
+                    with c_act:
+                        app_btn, rej_btn = st.columns(2)
+                        with app_btn:
+                            if st.button("Approve", key=f"app_{item.field_key}"):
+                                item.confirmation_status = STATUS_APPROVED
+                                st.rerun()
+                        with rej_btn:
+                            if st.button("Reject", key=f"rej_{item.field_key}"):
+                                item.confirmation_status = STATUS_REJECTED
+                                st.rerun()
+
+    # Missing Information Section
+    if analysis.missing_info:
+        st.markdown("---")
+        st.markdown("### ⚠️ Missing Information Detected")
+        st.caption("The AI identified the following critical gaps in your description. Addressing these strengthens your investor-readiness.")
+        for miss in analysis.missing_info:
+            with st.expander(f"{miss.dimension} — {miss.missing_information}"):
+                st.write(f"**Why it matters:** {miss.why_it_matters}")
+                st.write(f"**Recommended question:** {miss.suggested_question}")
+                st.write(f"**Suggested validation evidence:** {miss.suggested_evidence}")
+
+    # Suggested Evidence Section
+    if analysis.suggested_evidence:
+        st.markdown("---")
+        st.markdown("### 📋 Suggested Evidence Claims for Registry")
+        st.caption("The AI detected concrete validation claims. Confirming an item registers it in your Evidence Registry with status 'Founder submitted'.")
+        for idx, ev_cand in enumerate(analysis.suggested_evidence):
+            with st.expander(f"Claim: {ev_cand.evidence_title} ({ev_cand.evidence_type})"):
+                st.write(ev_cand.evidence_description)
+                st.caption(f"Related dimension: {ev_cand.related_dimension} | Verification: {ev_cand.verification_status}")
+                if ev_cand.supporting_excerpt:
+                    st.caption(f"Founder excerpt: \"{ev_cand.supporting_excerpt}\"")
+                if not ev_cand.is_approved:
+                    if st.button("Register as Evidence", key=f"reg_ev_ai_{idx}"):
+                        if st.session_state.startup_profile:
+                            save_evidence(st.session_state.startup_profile, ev_cand.as_dict())
+                            ev_cand.is_approved = True
+                            st.success(f"Registered '{ev_cand.evidence_title}' to Evidence Registry!")
+                            st.rerun()
+                        else:
+                            ev_cand.is_approved = True
+                            st.info("Claim approved. It will be recorded once your profile is reviewed and saved.")
+
+    # Batch action to apply approved values into the profile intake form
+    st.markdown("---")
+    b_col1, b_col2 = st.columns([2, 2])
+    with b_col1:
+        if st.button("Apply Approved Suggestions to Intake Form", type="primary"):
+            for item in analysis.fields:
+                if item.confirmation_status in (STATUS_APPROVED, STATUS_EDITED) and item.target_profile_key:
+                    st.session_state.profile_defaults[item.target_profile_key] = item.suggested_value
+            st.success("Approved suggestions loaded into the intake form fields below! Review and submit your profile.")
+            st.rerun()
+    with b_col2:
+        if st.button("Approve All Pending Suggestions"):
+            for item in analysis.fields:
+                if item.confirmation_status == STATUS_PENDING and item.suggested_value:
+                    item.confirmation_status = STATUS_APPROVED
+                    if item.target_profile_key:
+                        st.session_state.profile_defaults[item.target_profile_key] = item.suggested_value
+            st.success("All non-empty suggestions approved and populated into form defaults!")
+            st.rerun()
+
+st.markdown("---")
 
 
 with st.form("startup_intake_form"):
     st.markdown("## 1. Basic information")
     col1, col2, col3 = st.columns(3)
     with col1:
-        startup_name = st.text_input("Startup name *")
-        industry = st.text_input("Industry or sector")
+        default_name = st.session_state.profile_defaults.get("startup_name", "")
+        default_ind = st.session_state.profile_defaults.get("industry", "")
+        startup_name = st.text_input("Startup name *", value=default_name)
+        industry = st.text_input("Industry or sector", value=default_ind)
     with col2:
-        stage = st.selectbox("Startup stage", ["Idea", "Early validation", "Pre-seed", "Seed", "Other"])
+        default_stage = st.session_state.profile_defaults.get("stage", "Idea")
+        stage_options = ["Idea", "Early validation", "Pre-seed", "Seed", "Other"]
+        stage_idx = stage_options.index(default_stage) if default_stage in stage_options else 0
+        stage = st.selectbox("Startup stage", stage_options, index=stage_idx)
         if stage == "Other":
             stage = st.text_input("Describe the startup stage")
     with col3:
-        geography = st.text_input("Primary geography (optional)")
+        default_geo = st.session_state.profile_defaults.get("geography", "")
+        geography = st.text_input("Primary geography (optional)", value=default_geo)
     startup_description = field("Short startup description *", "startup_description", help_text="Describe what the startup does in one or two sentences.")
 
     st.markdown("## 2. Problem and solution")
@@ -262,6 +404,15 @@ if submitted:
         reset_assessment_state(st.session_state)
         st.session_state.assessment_view = False
         st.success("Startup profile received for review.")
+
+        # Register any pending approved AI evidence claims if not yet saved
+        if st.session_state.ai_analysis_result is not None:
+            for ev_cand in st.session_state.ai_analysis_result.suggested_evidence:
+                if ev_cand.is_approved:
+                    try:
+                        save_evidence(submission, ev_cand.as_dict())
+                    except Exception as err:
+                        pass
         st.markdown("## Submission summary")
         st.caption("This is an intake summary only. No score or recommendation has been generated.")
         summary_cols = st.columns(3)
@@ -502,6 +653,16 @@ if st.session_state.startup_profile is not None:
                 st.session_state.dashboard_view = False
                 st.rerun()
 
+            # Render document generator for the completed active assessment
+            render_document_generator(profile, {
+                "id": st.session_state.saved_assessment_id or 0,
+                "profile": profile,
+                "result": result,
+                "recommendations": recommendations,
+                "assessment_date": st.session_state.assessment_date,
+                "evidence": list_evidence(profile),
+            })
+
 
 def render_historical_assessment(record: dict[str, object]) -> None:
     """Display an immutable saved assessment without changing active session state."""
@@ -554,6 +715,157 @@ def render_historical_assessment(record: dict[str, object]) -> None:
         mime="text/html",
         key=f"historical_report_{record['id']}",
     )
+
+    # Render document generator for this historical snapshot
+    render_document_generator(historical_profile, record)
+
+
+# -------------------------------------------------------------------
+# Document Generator Section: Business Plan (DOCX) & Pitch Deck (PPTX)
+# -------------------------------------------------------------------
+def render_document_generator(profile: dict[str, Any], assessment_record: dict[str, Any] | None = None) -> None:
+    """Render the founder document generation section for DOCX and PPTX exports."""
+    st.markdown("---")
+    st.markdown("## 📄 Founder Document Generator (DOCX & PPTX)")
+    st.caption("Generate professional, editable Business Plans (DOCX) and Investor Pitch Decks (PPTX). Content is strictly derived from validated profile data, analytical readiness scores, and registered evidence without fabricating metrics.")
+
+    record_suffix = f"_{assessment_record['id']}" if assessment_record else "_active"
+    bp_key = f"last_generated_bp{record_suffix}"
+    bp_fname_key = f"last_bp_fname{record_suffix}"
+    deck_key = f"last_generated_deck{record_suffix}"
+    deck_fname_key = f"last_deck_fname{record_suffix}"
+
+    col_type, col_mode = st.columns([2, 2])
+    with col_type:
+        doc_choice = st.radio("Select document format to generate:", ["Business Plan (Word DOCX)", "Investor Pitch Deck (PowerPoint PPTX)"], horizontal=True, key=f"doc_choice{record_suffix}")
+    with col_mode:
+        st.write("**Data Source Snapshot:**")
+        if assessment_record:
+            st.info(f"Using saved Assessment #{assessment_record['id']} snapshot ({assessment_record.get('assessment_date') or 'Unspecified Date'}).")
+        else:
+            st.info(f"Using current active session profile for '{profile.get('startup_name', 'Current Startup')}'.")
+
+    # Business Plan Flow
+    if doc_choice == "Business Plan (Word DOCX)":
+        with st.expander("Preview & Edit Business Plan Sections (22 Sections)", expanded=False):
+            st.caption("Review or customize section content prior to exporting. Missing facts are flagged with amber prompts.")
+            bp_sections = draft_business_plan_content(
+                profile,
+                assessment=assessment_record,
+                evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile),
+                recommendations=assessment_record.get("recommendations", []) if assessment_record else (st.session_state.recommendations or ()),
+            )
+            for title, key in BUSINESS_PLAN_SECTIONS:
+                st.markdown(f"**{title}**")
+                bp_sections[key] = st.text_area(title, value=bp_sections.get(key, ""), key=f"bp_edit_{key}{record_suffix}", height=100, label_visibility="collapsed")
+
+        if st.button("Generate Business Plan (DOCX)", type="primary", key=f"btn_gen_bp{record_suffix}"):
+            with st.spinner("Compiling professional DOCX document..."):
+                bp_sections = draft_business_plan_content(
+                    profile,
+                    assessment=assessment_record,
+                    evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile),
+                    recommendations=assessment_record.get("recommendations", []) if assessment_record else (st.session_state.recommendations or ()),
+                )
+                docx_bytes = create_business_plan_docx(profile, bp_sections)
+                # Save to disk and database if assessment exists
+                s_name = re.sub(r"[^A-Za-z0-9]+", "-", str(profile.get("startup_name", "startup"))).lower()
+                doc_fname = f"business-plan-{s_name}.docx"
+                file_rel = f"documents/{doc_fname}"
+                out_disk = DEFAULT_DOCUMENTS_DIR / doc_fname
+                out_disk.parent.mkdir(parents=True, exist_ok=True)
+                out_disk.write_bytes(docx_bytes)
+
+                if assessment_record and database_error is None:
+                    save_generated_document(
+                        startup_id=ensure_startup(profile),
+                        assessment_id=assessment_record["id"],
+                        document_type="Business Plan",
+                        title=f"{profile.get('startup_name')} - Business Plan",
+                        file_path=file_rel,
+                        file_format="docx",
+                        generation_mode="verified_snapshot",
+                        sections=bp_sections,
+                    )
+                st.session_state[bp_key] = docx_bytes
+                st.session_state[bp_fname_key] = doc_fname
+                st.success("Business plan generated successfully!")
+
+        if bp_key in st.session_state:
+            st.download_button(
+                label="📥 Download Business Plan (.DOCX)",
+                data=st.session_state[bp_key],
+                file_name=st.session_state.get(bp_fname_key, "business-plan.docx"),
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                type="primary",
+                use_container_width=True,
+                key=f"dl_btn_bp{record_suffix}",
+            )
+
+    # Pitch Deck Flow
+    else:
+        with st.expander("Preview & Edit Pitch Deck Slides (12 Slides)", expanded=False):
+            st.caption("Review or adjust slide bullet points prior to presentation export.")
+            deck_slides = draft_pitch_deck_slides(
+                profile,
+                assessment=assessment_record,
+                evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile),
+            )
+            for title, key in PITCH_DECK_SLIDES:
+                s_info = deck_slides.get(key, {})
+                st.markdown(f"**{title} — {s_info.get('title')}**")
+                bullets_text = "\n".join(s_info.get("bullets", []))
+                edited_bullets = st.text_area(f"Bullets for {key}", value=bullets_text, key=f"deck_edit_{key}{record_suffix}", height=80, label_visibility="collapsed")
+                s_info["bullets"] = [b.strip() for b in edited_bullets.splitlines() if b.strip()]
+
+        if st.button("Generate Pitch Deck (PPTX)", type="primary", key=f"btn_gen_deck{record_suffix}"):
+            with st.spinner("Building styled 16:9 widescreen PowerPoint deck..."):
+                deck_slides = draft_pitch_deck_slides(
+                    profile,
+                    assessment=assessment_record,
+                    evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile),
+                )
+                pptx_bytes = create_pitch_deck_pptx(profile, deck_slides)
+                s_name = re.sub(r"[^A-Za-z0-9]+", "-", str(profile.get("startup_name", "startup"))).lower()
+                doc_fname = f"pitch-deck-{s_name}.pptx"
+                file_rel = f"documents/{doc_fname}"
+                out_disk = DEFAULT_DOCUMENTS_DIR / doc_fname
+                out_disk.parent.mkdir(parents=True, exist_ok=True)
+                out_disk.write_bytes(pptx_bytes)
+
+                if assessment_record and database_error is None:
+                    save_generated_document(
+                        startup_id=ensure_startup(profile),
+                        assessment_id=assessment_record["id"],
+                        document_type="Pitch Deck",
+                        title=f"{profile.get('startup_name')} - Pitch Deck",
+                        file_path=file_rel,
+                        file_format="pptx",
+                        generation_mode="verified_snapshot",
+                        sections={k: v.get("bullets", []) for k, v in deck_slides.items()},
+                    )
+                st.session_state[deck_key] = pptx_bytes
+                st.session_state[deck_fname_key] = doc_fname
+                st.success("Investor pitch deck generated successfully!")
+
+        if deck_key in st.session_state:
+            st.download_button(
+                label="📥 Download Investor Pitch Deck (.PPTX)",
+                data=st.session_state[deck_key],
+                file_name=st.session_state.get(deck_fname_key, "pitch-deck.pptx"),
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                type="primary",
+                use_container_width=True,
+                key=f"dl_btn_deck{record_suffix}",
+            )
+
+    # Document History List
+    if database_error is None and assessment_record:
+        doc_history = list_generated_documents(assessment_id=assessment_record["id"])
+        if doc_history:
+            st.markdown("#### Previously Generated Document Versions")
+            for doc_item in doc_history:
+                st.caption(f"• **v{doc_item['document_version']}** {doc_item['document_type']} — Format: `{doc_item['file_format'].upper()}` — Created: {doc_item['created_at']}")
 
 
 if database_error is None:

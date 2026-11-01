@@ -18,6 +18,7 @@ from scoring import AssessmentResult, DimensionScore
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "startup_iq.db"
 DEFAULT_ATTACHMENT_DIR = PROJECT_ROOT / "data" / "attachments"
+DEFAULT_DOCUMENTS_DIR = PROJECT_ROOT / "data" / "documents"
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 ALLOWED_ATTACHMENT_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".png", ".jpg", ".jpeg"}
 EVIDENCE_TYPES = (
@@ -85,6 +86,21 @@ CREATE TABLE IF NOT EXISTS assessment_evidence (
     evidence_json TEXT NOT NULL,
     PRIMARY KEY (assessment_id, evidence_id)
 );
+CREATE TABLE IF NOT EXISTS generated_documents (
+    document_id TEXT PRIMARY KEY,
+    startup_id INTEGER NOT NULL REFERENCES startups(id),
+    assessment_id INTEGER NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+    document_type TEXT NOT NULL,
+    document_version INTEGER NOT NULL DEFAULT 1,
+    title TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    file_format TEXT NOT NULL,
+    generation_mode TEXT NOT NULL,
+    review_status TEXT NOT NULL DEFAULT 'Draft',
+    sections_json TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_docs_assessment ON generated_documents(assessment_id, created_at DESC);
 """
 
 
@@ -279,6 +295,82 @@ def save_assessment(profile: Mapping[str, Any], inputs: Mapping[str, Any], resul
                 connection.execute("INSERT INTO assessment_evidence (assessment_id, evidence_id, evidence_json) VALUES (?, ?, ?)",
                                    (assessment_id, evidence_id, json.dumps(dict(evidence), sort_keys=True, default=str)))
         return int(assessment_id)
+
+
+def save_generated_document(
+    startup_id: int,
+    assessment_id: int,
+    document_type: str,
+    title: str,
+    file_path: str,
+    file_format: str,
+    generation_mode: str = "heuristic",
+    sections: Mapping[str, Any] | None = None,
+    review_status: str = "Draft",
+    path: str | Path = DEFAULT_DB_PATH,
+) -> str:
+    """Record a generated DOCX or PPTX document with auto-incremented versioning."""
+    initialize_database(path)
+    doc_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection(path) as connection:
+        # Determine next document version for this assessment and doc type
+        row = connection.execute(
+            "SELECT MAX(document_version) as max_v FROM generated_documents WHERE assessment_id = ? AND document_type = ?",
+            (assessment_id, document_type)
+        ).fetchone()
+        next_version = (row["max_v"] or 0) + 1 if row else 1
+
+        connection.execute(
+            """INSERT INTO generated_documents
+            (document_id, startup_id, assessment_id, document_type, document_version,
+             title, file_path, file_format, generation_mode, review_status, sections_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (doc_id, startup_id, assessment_id, document_type, next_version,
+             title, file_path, file_format.lower(), generation_mode, review_status,
+             json.dumps(dict(sections), sort_keys=True, default=str) if sections else None, now)
+        )
+    return doc_id
+
+
+def list_generated_documents(
+    assessment_id: int | None = None,
+    startup_id: int | None = None,
+    document_type: str | None = None,
+    path: str | Path = DEFAULT_DB_PATH,
+) -> list[dict[str, Any]]:
+    """List historical generated documents."""
+    initialize_database(path)
+    clauses, params = [], []
+    if assessment_id is not None:
+        clauses.append("assessment_id = ?")
+        params.append(assessment_id)
+    if startup_id is not None:
+        clauses.append("startup_id = ?")
+        params.append(startup_id)
+    if document_type is not None:
+        clauses.append("document_type = ?")
+        params.append(document_type)
+
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    with get_connection(path) as connection:
+        rows = connection.execute(
+            f"SELECT * FROM generated_documents{where} ORDER BY created_at DESC", params
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_generated_document(document_id: str, path: str | Path = DEFAULT_DB_PATH) -> dict[str, Any] | None:
+    """Retrieve document metadata by document ID."""
+    initialize_database(path)
+    with get_connection(path) as connection:
+        row = connection.execute("SELECT * FROM generated_documents WHERE document_id = ?", (document_id,)).fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    if data.get("sections_json"):
+        data["sections"] = json.loads(data["sections_json"])
+    return data
 
 
 def list_assessments(path: str | Path = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
