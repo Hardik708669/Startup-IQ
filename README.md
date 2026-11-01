@@ -116,6 +116,42 @@ After submitting a startup profile, use **Evidence Inbox / Registry** to registe
 
 Copy `.env.example` to `.env` only when optional future AI configuration is needed. No credentials are required for the current app.
 
+## User Authentication, Workspace Management & Multi-User Data Security (Phase 6)
+
+Startup IQ features account management, workspace isolation, and object-level data security:
+
+- **User Registration & Password Security**: Secure user registration requiring full name, valid email, and strong password enforcement (minimum 8 characters with uppercase, lowercase, and numeric requirements). Passwords are hashed using the state-of-the-art **Argon2id** algorithm (`time_cost=3`, `memory_cost=64MB`, `parallelism=4`). Plaintext passwords and hashes are never logged.
+- **Cryptographic JWT Session Tokens**: Authentication uses cryptographically signed JSON Web Tokens (PyJWT, HMAC-SHA256) storing `user_id`, `email`, issue timestamp, expiration (24 hours), and a unique `jti`. The secret key is loaded from the environment variable `AUTH_JWT_SECRET` (falling back to a development key with production warnings).
+- **Workspaces & Multi-Tenancy**: Users can create, switch between, and manage multiple workspaces. Each workspace encapsulates its own startups, assessments, evidence records, and founder documents.
+- **Strict Object-Level Data Isolation**: Enforced in the database/service layer via parameterized queries and transactions, not just UI conditions:
+  - Startup intake & profiles are scoped by `workspace_id` and `user_id`.
+  - Seven-dimension assessments and scoring history cannot be viewed or queried by unauthorized users.
+  - Evidence records, attachments, and updates reject unauthorized modifications.
+  - Business plan (DOCX) and pitch deck (PPTX) generations and version histories are completely isolated.
+  - ID manipulation attempts by malicious users are rejected at the data layer without leaking information.
+- **Legacy Database Migration**: Existing local records are backed up automatically to timestamped files (`data/startup_iq_backup_*.db`) and safely bootstrapped under an isolated legacy administrator workspace (`legacy-admin@startup-iq.local`), ensuring newly registered users never inherit pre-existing data.
+
+### Authentication Environment Configuration
+
+In `.env`:
+```bash
+AUTH_JWT_SECRET=your-32-char-min-cryptographic-secret-here
+```
+
+### Registration & Login Instructions
+
+1. Start the app: `python -m streamlit run app.py`
+2. Navigate to the **📝 Create account** tab:
+   - Enter Full Name, Email Address, and Password matching security rules.
+   - Click **Create account**. A default personal workspace is automatically provisioned.
+3. Switch to the **🔑 Log in** tab:
+   - Enter registered Email Address and Password.
+   - Click **Log in**.
+4. Choose or create a workspace to enter the application.
+5. In the sidebar, view the active workspace name, switch between workspaces if multiple exist, or click **🚪 Log out** to safely end the session.
+
 ## Limitations and next steps
 
-Authentication, multi-user collaboration, complex forecasting, cloud infrastructure, MySQL migration, and OCR / PDF content parsing remain outside the current MVP. SQLite is an intentional local-MVP deviation from the original MySQL blueprint; it does not provide multi-user isolation or cloud backups. The next improvements should focus on integration coverage, UI polish, and deployment preparation.
+- **Architecture Deviation**: The original conceptual blueprint mentioned React, FastAPI, and MySQL. Startup IQ intentionally implements a Python, Streamlit, and SQLite architecture for the MVP to prioritize rapid validation, determinism, and single-process simplicity.
+- **SQLite Concurrency**: SQLite utilizes database-level locking for writes; for high concurrent multi-tenant loads, migrating to PostgreSQL/MySQL via an ORM/service layer is recommended.
+- **Co-founder Collaboration**: Workspaces are currently single-owner; multi-user shared access, team invites, and granular RBAC are planned for future enterprise releases.

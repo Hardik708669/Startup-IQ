@@ -20,3 +20,6 @@ reports/
 # Reference assets kept locally but excluded from the first commit.
 /Deconstructing_Startup_IQ.mp4
 /Startup_IQ_Project_Concept_and_Implementation_Blueprint.docx
+
+# Database backups created by backup_database() during schema migrations
+data/startup_iq_backup_*.db

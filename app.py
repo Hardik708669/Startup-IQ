@@ -1,5 +1,6 @@
 """Startup IQ intake, assessment, and results dashboard interface."""
 
+import re
 from datetime import date
 from typing import Any
 
@@ -26,18 +27,236 @@ from database import (DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR, EVIDENCE_TYPES, VE
                        archive_evidence, ensure_startup, get_assessment, get_generated_document,
                        initialize_database, list_evidence, list_assessments, list_generated_documents,
                        save_assessment, save_evidence, save_generated_document, store_attachment,
-                       update_evidence)
+                       update_evidence, create_user, get_user_by_email, get_user_by_id,
+                       update_user_last_login, create_workspace, list_user_workspaces,
+                       get_workspace, update_workspace, archive_workspace, bootstrap_legacy_ownership)
+from auth_service import (hash_password, verify_password, validate_password_strength,
+                          validate_email, create_session_token, verify_session_token)
 
 st.set_page_config(page_title="Startup IQ | Startup Intake", page_icon="📊", layout="wide")
-st.title("Startup IQ")
-st.subheader("An analytical indicator, not a magic prediction.")
-st.write("Complete this structured profile before assessment. Claims, estimates, and unknowns are kept distinct; no score is calculated at this stage.")
 
+# ---------------------------------------------------------------------------
+# Database initialisation (runs before auth so tables exist)
+# ---------------------------------------------------------------------------
 try:
     initialize_database()
     database_error = None
 except Exception as error:
     database_error = str(error)
+
+# ---------------------------------------------------------------------------
+# Auth session-state initialisation
+# ---------------------------------------------------------------------------
+if "auth_token" not in st.session_state:
+    st.session_state.auth_token = None
+if "current_user_id" not in st.session_state:
+    st.session_state.current_user_id = None
+if "current_user_email" not in st.session_state:
+    st.session_state.current_user_email = None
+if "current_user_name" not in st.session_state:
+    st.session_state.current_user_name = None
+if "active_workspace_id" not in st.session_state:
+    st.session_state.active_workspace_id = None
+if "active_workspace_name" not in st.session_state:
+    st.session_state.active_workspace_name = None
+if "_auth_tab" not in st.session_state:
+    st.session_state._auth_tab = "Login"
+
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+def _do_logout() -> None:
+    """Clear all auth and workspace session state and rerun."""
+    for key in ["auth_token", "current_user_id", "current_user_email", "current_user_name",
+                "active_workspace_id", "active_workspace_name", "startup_profile",
+                "assessment_entries", "assessment_result", "recommendations",
+                "assessment_view", "dashboard_view", "assessment_date",
+                "saved_assessment_id", "ai_analysis_result", "profile_defaults", "_auth_tab"]:
+        st.session_state.pop(key, None)
+    st.rerun()
+
+
+def _resolve_user_from_token() -> bool:
+    """Verify stored JWT and populate current_user_* keys. Returns True if valid."""
+    token = st.session_state.get("auth_token")
+    if not token:
+        return False
+    payload = verify_session_token(token)
+    if payload is None:
+        # Token expired or invalid — wipe it
+        st.session_state.auth_token = None
+        return False
+    st.session_state.current_user_id = payload["user_id"]
+    st.session_state.current_user_email = payload["email"]
+    # Reload full name from DB on each rerun so renames propagate
+    user_row = get_user_by_id(payload["user_id"])
+    st.session_state.current_user_name = user_row["full_name"] if user_row else payload["email"]
+    return True
+
+
+def _render_auth_wall() -> None:
+    """Render login / registration forms and halt further rendering."""
+    st.title("Startup IQ")
+    auth_mode = st.radio("Account action", ["Log in", "Create account"], horizontal=True, label_visibility="collapsed")
+
+    if auth_mode == "Log in":
+        st.subheader("Log in to your account")
+        with st.form("login_form"):
+            email_in = st.text_input("Email address", key="login_email")
+            pw_in = st.text_input("Password", type="password", key="login_pw")
+            login_btn = st.form_submit_button("Log in", type="primary", use_container_width=True)
+        if login_btn:
+            if not email_in.strip() or not pw_in:
+                st.error("Please enter your email and password.")
+            else:
+                user_row = get_user_by_email(email_in.strip())
+                if user_row is None or not verify_password(pw_in, user_row["password_hash"]):
+                    st.error("Invalid email or password.")
+                elif user_row.get("account_status") != "active":
+                    st.error("This account has been deactivated. Contact support.")
+                else:
+                    token = create_session_token(user_row["user_id"], user_row["email"])
+                    st.session_state.auth_token = token
+                    st.session_state.current_user_id = user_row["user_id"]
+                    st.session_state.current_user_email = user_row["email"]
+                    st.session_state.current_user_name = user_row["full_name"]
+                    update_user_last_login(user_row["user_id"])
+                    # Auto-select workspace if user has exactly one
+                    workspaces = list_user_workspaces(user_row["user_id"])
+                    if len(workspaces) == 1:
+                        st.session_state.active_workspace_id = workspaces[0]["workspace_id"]
+                        st.session_state.active_workspace_name = workspaces[0]["workspace_name"]
+                    st.rerun()
+
+    else:
+        st.subheader("Create a new account")
+        with st.form("register_form"):
+            full_name_in = st.text_input("Full name", key="reg_name")
+            email_reg = st.text_input("Email address", key="reg_email")
+            pw_reg = st.text_input("Password", type="password", key="reg_pw",
+                                   help="Minimum 8 characters, one uppercase, one lowercase, one digit.")
+            pw_confirm = st.text_input("Confirm password", type="password", key="reg_pw_confirm")
+            reg_btn = st.form_submit_button("Create account", type="primary", use_container_width=True)
+        if reg_btn:
+            errs: list[str] = []
+            if not full_name_in.strip():
+                errs.append("Full name is required.")
+            if not validate_email(email_reg.strip()):
+                errs.append("Enter a valid email address.")
+            pw_errs = validate_password_strength(pw_reg)
+            errs.extend(pw_errs)
+            if pw_reg != pw_confirm:
+                errs.append("Passwords do not match.")
+            if errs:
+                for e in errs:
+                    st.error(e)
+            else:
+                existing = get_user_by_email(email_reg.strip())
+                if existing:
+                    st.error("An account with this email already exists. Please log in.")
+                else:
+                    try:
+                        pw_hash = hash_password(pw_reg)
+                        new_uid = create_user(full_name_in.strip(), email_reg.strip().lower(), pw_hash)
+                        # Create a default workspace for the new user
+                        create_workspace(new_uid, f"{full_name_in.strip()}'s Workspace")
+                        st.success("Account created! You can now log in.")
+                    except Exception as reg_err:
+                        st.error(f"Registration failed: {reg_err}")
+
+
+def _render_workspace_selector(user_id: int) -> None:
+    """Render workspace selection / creation when no workspace is active."""
+    st.title("Startup IQ")
+    st.subheader("Choose a workspace")
+    st.caption("Each workspace holds its own startups, assessments, and evidence records.")
+    workspaces = list_user_workspaces(user_id)
+    if workspaces:
+        ws_options = {ws["workspace_name"]: ws for ws in workspaces}
+        chosen_name = st.selectbox("Select a workspace", list(ws_options.keys()))
+        if st.button("Open workspace", type="primary"):
+            chosen = ws_options[chosen_name]
+            st.session_state.active_workspace_id = chosen["workspace_id"]
+            st.session_state.active_workspace_name = chosen["workspace_name"]
+            st.rerun()
+        st.markdown("---")
+    st.markdown("#### Create a new workspace")
+    with st.form("new_workspace_form"):
+        new_ws_name = st.text_input("Workspace name")
+        new_ws_desc = st.text_input("Description (optional)")
+        create_ws_btn = st.form_submit_button("Create workspace", type="secondary")
+    if create_ws_btn:
+        if not new_ws_name.strip():
+            st.error("Workspace name cannot be empty.")
+        else:
+            try:
+                ws_id = create_workspace(user_id, new_ws_name.strip(), new_ws_desc.strip() or None)
+                st.session_state.active_workspace_id = ws_id
+                st.session_state.active_workspace_name = new_ws_name.strip()
+                st.success(f"Workspace '{new_ws_name.strip()}' created and selected.")
+                st.rerun()
+            except Exception as ws_err:
+                st.error(f"Could not create workspace: {ws_err}")
+
+
+# ---------------------------------------------------------------------------
+# Authentication gate — must pass before any main content renders
+# ---------------------------------------------------------------------------
+_authenticated = _resolve_user_from_token()
+
+if not _authenticated:
+    _render_auth_wall()
+    st.stop()
+
+# Workspace gate — if authenticated but no workspace selected yet
+if st.session_state.active_workspace_id is None:
+    _render_workspace_selector(st.session_state.current_user_id)
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# Sidebar: User info, workspace selector, and logout
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown(f"**👤 {st.session_state.current_user_name}**")
+    st.caption(st.session_state.current_user_email)
+    st.markdown("---")
+    # Workspace switcher
+    _all_workspaces = list_user_workspaces(st.session_state.current_user_id)
+    if len(_all_workspaces) > 1:
+        _ws_names = [ws["workspace_name"] for ws in _all_workspaces]
+        _ws_ids   = [ws["workspace_id"] for ws in _all_workspaces]
+        _cur_idx  = _ws_ids.index(st.session_state.active_workspace_id) if st.session_state.active_workspace_id in _ws_ids else 0
+        _selected_ws = st.selectbox("🗂 Active workspace", _ws_names, index=_cur_idx, key="sidebar_ws_select")
+        _selected_ws_obj = next(ws for ws in _all_workspaces if ws["workspace_name"] == _selected_ws)
+        if _selected_ws_obj["workspace_id"] != st.session_state.active_workspace_id:
+            st.session_state.active_workspace_id = _selected_ws_obj["workspace_id"]
+            st.session_state.active_workspace_name = _selected_ws_obj["workspace_name"]
+            # Reset intake/assessment state when switching workspaces
+            for _k in ["startup_profile", "assessment_entries", "assessment_result",
+                       "recommendations", "assessment_view", "dashboard_view",
+                       "assessment_date", "saved_assessment_id", "ai_analysis_result", "profile_defaults"]:
+                st.session_state.pop(_k, None)
+            st.rerun()
+    else:
+        st.caption(f"🗂 **{st.session_state.active_workspace_name}**")
+
+    st.markdown("---")
+    if st.button("🚪 Log out", use_container_width=True):
+        _do_logout()
+
+# Convenience aliases used throughout the page
+_uid  = st.session_state.current_user_id
+_wsid = st.session_state.active_workspace_id
+
+# ---------------------------------------------------------------------------
+# Main application header (only reached when authenticated)
+# ---------------------------------------------------------------------------
+st.title("Startup IQ")
+st.subheader("An analytical indicator, not a magic prediction.")
+st.write("Complete this structured profile before assessment. Claims, estimates, and unknowns are kept distinct; no score is calculated at this stage.")
+
+if database_error is not None:
     st.warning("Local assessment history is unavailable in this session. Current in-memory assessment features remain available.")
 
 if "startup_profile" not in st.session_state:
@@ -279,7 +498,7 @@ def render_summary_section(title: str, fields: list[tuple[str, str]], submission
             render_summary_field(label, submission.get(key, ""))
 
 
-def render_evidence_registry(profile: dict[str, object]) -> None:
+def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | None = None, user_id: int | None = None) -> None:
     """Render the local evidence inbox without changing assessment scores."""
     st.markdown("## Evidence Inbox / Registry")
     st.caption("Evidence records are separate from assessment ratings and classifications. Verification labels reflect submitted review state, not independent confirmation.")
@@ -314,7 +533,7 @@ def render_evidence_registry(profile: dict[str, object]) -> None:
                         "related_dimension": dimension, "source_name": source_name, "source_url": source_url,
                         "source_date": source_date.isoformat() if source_date else "", "verification_status": verification,
                         "founder_notes": notes, **attachment_data,
-                    })
+                    }, workspace_id=workspace_id, user_id=user_id)
                     st.success(f"Evidence registered ({evidence_id}).")
                     st.rerun()
                 except Exception as error:
@@ -344,11 +563,11 @@ def render_evidence_registry(profile: dict[str, object]) -> None:
                 with edit: edit_clicked = st.form_submit_button("Save changes")
                 with archive: archive_clicked = st.form_submit_button("Archive record")
             if edit_clicked:
-                update_evidence(record["evidence_id"], {"verification_status": new_status, "founder_notes": new_notes})
+                update_evidence(record["evidence_id"], {"verification_status": new_status, "founder_notes": new_notes}, user_id=user_id)
                 st.success("Evidence updated.")
                 st.rerun()
             if archive_clicked:
-                archive_evidence(record["evidence_id"])
+                archive_evidence(record["evidence_id"], user_id=user_id)
                 st.success("Evidence archived; historical snapshots are preserved.")
                 st.rerun()
 
@@ -469,7 +688,7 @@ if st.session_state.startup_profile is not None:
     st.markdown("---")
     profile = st.session_state.startup_profile
     if database_error is None:
-        render_evidence_registry(profile)
+        render_evidence_registry(profile, workspace_id=_wsid, user_id=_uid)
     if not st.session_state.assessment_view:
         st.markdown("## Continue to assessment")
         st.write(f"Your validated profile for **{profile['startup_name']}** is stored for this session. Review it above, then continue when ready.")
@@ -550,6 +769,8 @@ if st.session_state.startup_profile is not None:
                             st.session_state.recommendations,
                             st.session_state.assessment_date,
                         evidence_ids=[item["evidence_id"] for item in list_evidence(profile)],
+                        workspace_id=_wsid,
+                        user_id=_uid,
                         )
                     except Exception as error:
                         st.session_state.saved_assessment_id = None
@@ -778,7 +999,7 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
 
                 if assessment_record and database_error is None:
                     save_generated_document(
-                        startup_id=ensure_startup(profile),
+                        startup_id=ensure_startup(profile, workspace_id=_wsid, user_id=_uid),
                         assessment_id=assessment_record["id"],
                         document_type="Business Plan",
                         title=f"{profile.get('startup_name')} - Business Plan",
@@ -786,6 +1007,8 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
                         file_format="docx",
                         generation_mode="verified_snapshot",
                         sections=bp_sections,
+                        workspace_id=_wsid,
+                        user_id=_uid,
                     )
                 st.session_state[bp_key] = docx_bytes
                 st.session_state[bp_fname_key] = doc_fname
@@ -835,7 +1058,7 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
 
                 if assessment_record and database_error is None:
                     save_generated_document(
-                        startup_id=ensure_startup(profile),
+                        startup_id=ensure_startup(profile, workspace_id=_wsid, user_id=_uid),
                         assessment_id=assessment_record["id"],
                         document_type="Pitch Deck",
                         title=f"{profile.get('startup_name')} - Pitch Deck",
@@ -843,6 +1066,8 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
                         file_format="pptx",
                         generation_mode="verified_snapshot",
                         sections={k: v.get("bullets", []) for k, v in deck_slides.items()},
+                        workspace_id=_wsid,
+                        user_id=_uid,
                     )
                 st.session_state[deck_key] = pptx_bytes
                 st.session_state[deck_fname_key] = doc_fname
@@ -870,7 +1095,7 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
 
 if database_error is None:
     try:
-        history = list_assessments()
+        history = list_assessments(workspace_id=_wsid, user_id=_uid)
     except Exception as error:
         history = []
         st.sidebar.error(f"Assessment history could not be loaded: {error}")
@@ -887,6 +1112,6 @@ if database_error is None:
             ),
         )
         if selected_history_id is not None:
-            historical_record = get_assessment(selected_history_id)
+            historical_record = get_assessment(selected_history_id, user_id=_uid)
             if historical_record is not None:
                 render_historical_assessment(historical_record)
