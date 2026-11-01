@@ -11,7 +11,9 @@ from scoring import DIMENSIONS, calculate_assessment
 from dashboard import DISCLAIMER, dimension_rows, evidence_status_counts
 from recommendations import generate_recommendations
 from report_generator import generate_report, report_filename
-from database import DEFAULT_DB_PATH, get_assessment, initialize_database, list_assessments, save_assessment
+from database import (DEFAULT_DB_PATH, EVIDENCE_TYPES, VERIFICATION_STATUSES, archive_evidence,
+                       ensure_startup, get_assessment, initialize_database, list_evidence, list_assessments,
+                       save_assessment, save_evidence, store_attachment, update_evidence)
 
 st.set_page_config(page_title="Startup IQ | Startup Intake", page_icon="📊", layout="wide")
 st.title("Startup IQ")
@@ -135,6 +137,80 @@ def render_summary_section(title: str, fields: list[tuple[str, str]], submission
             render_summary_field(label, submission.get(key, ""))
 
 
+def render_evidence_registry(profile: dict[str, object]) -> None:
+    """Render the local evidence inbox without changing assessment scores."""
+    st.markdown("## Evidence Inbox / Registry")
+    st.caption("Evidence records are separate from assessment ratings and classifications. Verification labels reflect submitted review state, not independent confirmation.")
+    with st.expander("Add evidence", expanded=False):
+        with st.form("evidence_form"):
+            title = st.text_input("Evidence title *")
+            description = st.text_area("Evidence claim or description *")
+            type_choice = st.selectbox("Evidence type *", EVIDENCE_TYPES)
+            custom_type = st.text_input("Custom category (used when type is Other)")
+            dimension = st.selectbox("Related assessment dimension *", [d.name for d in DIMENSIONS])
+            source_name = st.text_input("Source name")
+            source_url = st.text_input("Source URL or reference")
+            source_date = st.date_input("Evidence date", value=None)
+            verification = st.selectbox("Verification status", VERIFICATION_STATUSES)
+            notes = st.text_area("Founder notes")
+            attachment = st.file_uploader("Optional attachment (PDF, DOCX, XLSX, CSV, TXT, PNG, JPG)", type=["pdf", "docx", "xlsx", "csv", "txt", "png", "jpg", "jpeg"])
+            add = st.form_submit_button("Register evidence", type="primary")
+        if add:
+            selected_type = custom_type.strip() if type_choice == "Other" and custom_type.strip() else type_choice
+            if type_choice == "Other" and not custom_type.strip():
+                st.error("Enter a custom evidence category.")
+            elif not title.strip() or not description.strip():
+                st.error("Evidence title and description are required.")
+            else:
+                attachment_data = {}
+                try:
+                    if attachment is not None:
+                        stored, original, size = store_attachment(attachment.name, attachment.getvalue())
+                        attachment_data = {"attachment_path": stored, "attachment_original_name": original, "attachment_size": size}
+                    evidence_id = save_evidence(profile, {
+                        "evidence_title": title, "evidence_description": description, "evidence_type": selected_type,
+                        "related_dimension": dimension, "source_name": source_name, "source_url": source_url,
+                        "source_date": source_date.isoformat() if source_date else "", "verification_status": verification,
+                        "founder_notes": notes, **attachment_data,
+                    })
+                    st.success(f"Evidence registered ({evidence_id}).")
+                    st.rerun()
+                except Exception as error:
+                    st.error(f"Evidence could not be registered: {error}")
+
+    records = list_evidence(profile)
+    filter_cols = st.columns(4)
+    search = filter_cols[0].text_input("Search evidence", key="evidence_search")
+    dimension_filter = filter_cols[1].selectbox("Filter dimension", ["All"] + [d.name for d in DIMENSIONS], key="evidence_dimension_filter")
+    type_filter = filter_cols[2].selectbox("Filter type", ["All"] + list(EVIDENCE_TYPES), key="evidence_type_filter")
+    status_filter = filter_cols[3].selectbox("Filter verification", ["All"] + list(VERIFICATION_STATUSES), key="evidence_status_filter")
+    records = list_evidence(profile, dimension=None if dimension_filter == "All" else dimension_filter,
+                            evidence_type=None if type_filter == "All" else type_filter,
+                            verification_status=None if status_filter == "All" else status_filter, search=search)
+    if not records:
+        st.info("No registered evidence matches the current filters.")
+    for record in records:
+        with st.expander(f"{record['evidence_title']} — {record['related_dimension']} — {record['verification_status']}"):
+            st.write(record["evidence_description"])
+            st.caption(f"Type: {record['evidence_type']} | Source: {record['source_name'] or 'Not provided'} | Submitted: {record['submission_date']}")
+            if record.get("attachment_original_name"):
+                st.caption(f"Attachment: {record['attachment_original_name']} (stored privately)")
+            with st.form(f"edit_evidence_{record['evidence_id']}"):
+                new_status = st.selectbox("Update verification status", VERIFICATION_STATUSES, index=VERIFICATION_STATUSES.index(record["verification_status"]))
+                new_notes = st.text_area("Update founder notes", value=record.get("founder_notes") or "")
+                edit, archive = st.columns(2)
+                with edit: edit_clicked = st.form_submit_button("Save changes")
+                with archive: archive_clicked = st.form_submit_button("Archive record")
+            if edit_clicked:
+                update_evidence(record["evidence_id"], {"verification_status": new_status, "founder_notes": new_notes})
+                st.success("Evidence updated.")
+                st.rerun()
+            if archive_clicked:
+                archive_evidence(record["evidence_id"])
+                st.success("Evidence archived; historical snapshots are preserved.")
+                st.rerun()
+
+
 if submitted:
     submission = {
         "startup_name": startup_name,
@@ -241,6 +317,8 @@ if submitted:
 if st.session_state.startup_profile is not None:
     st.markdown("---")
     profile = st.session_state.startup_profile
+    if database_error is None:
+        render_evidence_registry(profile)
     if not st.session_state.assessment_view:
         st.markdown("## Continue to assessment")
         st.write(f"Your validated profile for **{profile['startup_name']}** is stored for this session. Review it above, then continue when ready.")
@@ -256,6 +334,21 @@ if st.session_state.startup_profile is not None:
             for dimension in DIMENSIONS:
                 st.markdown(f"### {dimension.name} — {dimension.weight}%")
                 st.caption(get_dimension_question(dimension.identifier))
+                
+                # Show relevant evidence records for this dimension
+                if database_error is None:
+                    dim_evidence = list_evidence(profile, dimension=dimension.name)
+                    if dim_evidence:
+                        with st.expander(f"Supporting evidence for {dimension.name} ({len(dim_evidence)} registered)", expanded=False):
+                            st.caption("Verification labels reflect submitted review state and do not guarantee claim truth. An existing evidence record does not automatically increase or decrease the rating.")
+                            for ev in dim_evidence:
+                                att_info = f" | Attachment: {ev['attachment_original_name']}" if ev.get("attachment_original_name") else ""
+                                st.markdown(f"- **{ev['evidence_title']}** ({ev['evidence_type']}) — *Verification:* `{ev['verification_status']}`{att_info}")
+                                if ev.get("evidence_description"):
+                                    st.caption(f"  Claim: {ev['evidence_description']}")
+                    else:
+                        st.caption(f"*No registered evidence currently recorded for {dimension.name}.*")
+
                 rating = st.slider(
                     f"{dimension.name} rating",
                     min_value=0,
@@ -305,6 +398,7 @@ if st.session_state.startup_profile is not None:
                             st.session_state.assessment_result,
                             st.session_state.recommendations,
                             st.session_state.assessment_date,
+                        evidence_ids=[item["evidence_id"] for item in list_evidence(profile)],
                         )
                     except Exception as error:
                         st.session_state.saved_assessment_id = None
@@ -383,6 +477,7 @@ if st.session_state.startup_profile is not None:
                 result,
                 recommendations,
                 st.session_state.assessment_date,
+                evidence=list_evidence(profile),
             )
             st.download_button(
                 "Download Assessment Report",
@@ -427,6 +522,19 @@ def render_historical_assessment(record: dict[str, object]) -> None:
             st.write(f"**Evidence status:** {item.evidence_status}")
             st.write(f"**Missing evidence:** {'Yes' if item.missing_evidence else 'No'}")
             st.write(f"**Rationale:** {item.rationale or 'Not provided'}")
+
+    saved_evidence = record.get("evidence", [])
+    st.markdown("### Historical evidence snapshot")
+    if not saved_evidence:
+        st.write("No registered evidence was associated with this historical assessment snapshot.")
+    else:
+        for ev in saved_evidence:
+            with st.expander(f"{ev.get('evidence_title', 'Untitled')} — {ev.get('related_dimension', 'General')} ({ev.get('verification_status', 'Not reviewed')})"):
+                st.write(ev.get("evidence_description", ""))
+                st.caption(f"Type: {ev.get('evidence_type')} | Source: {ev.get('source_name') or 'Not provided'} | Date: {ev.get('source_date') or 'Not provided'}")
+                if ev.get("attachment_original_name"):
+                    st.caption(f"Attachment (historical metadata): {ev.get('attachment_original_name')}")
+
     st.markdown("### Saved recommendations")
     if not historical_recommendations:
         st.write("No recommendations were saved for this assessment.")
@@ -437,6 +545,7 @@ def render_historical_assessment(record: dict[str, object]) -> None:
         historical_result,
         historical_recommendations,
         record.get("assessment_date"),
+        evidence=record.get("evidence", []),
     )
     st.download_button(
         "Download Historical Assessment Report",

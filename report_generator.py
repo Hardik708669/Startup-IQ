@@ -51,6 +51,7 @@ def generate_report(
     result: AssessmentResult | None,
     recommendations: Iterable[Recommendation] = (),
     assessment_date: str | None = None,
+    evidence: Iterable[Mapping[str, object]] = (),
 ) -> str:
     """Generate a standalone HTML report from the current assessment result.
 
@@ -89,6 +90,13 @@ def generate_report(
         f"<li><strong>{escape(status)}:</strong> {count} dimension(s)</li>"
         for status, count in statuses.items()
     ) or "<li>No dimension evidence statuses available.</li>"
+    evidence_items = list(evidence)
+    evidence_html = "".join(
+        f"<tr><td>{_text(item.get('evidence_title'))}</td><td>{_text(item.get('evidence_type'))}</td>"
+        f"<td>{_text(item.get('related_dimension'))}</td><td>{_text(item.get('source_name') or item.get('source_url'))}</td>"
+        f"<td>{_text(item.get('source_date'))}</td><td>{_text(item.get('verification_status'))}</td></tr>"
+        for item in evidence_items
+    ) or "<tr><td colspan='6'>No registered evidence was associated with this assessment.</td></tr>"
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -116,6 +124,7 @@ th, td {{ border: 1px solid #d5dfe3; padding: 10px; text-align: left; vertical-a
 <p><strong>Assessment dimensions:</strong> {len(result.dimensions)}</p></section>
 <section><h2>Dimension Breakdown</h2><div class="table-wrap"><table><thead><tr><th>Dimension</th><th>Rating</th><th>Weight</th><th>Contribution</th><th>Rationale</th><th>Evidence status</th><th>Missing evidence</th></tr></thead><tbody>{rows_html}</tbody></table></div></section>
 <section><h2>Evidence Analysis</h2><p>Statuses below reflect user-submitted classifications and are not independently verified.</p><ul>{status_html}</ul><p>Missing evidence is distinct from a low numerical rating. Estimates, hypotheses, and information not yet known should be validated before being treated as established support.</p></section>
+<section><h2>Registered Supporting Evidence</h2><p>Verification statuses describe submitted review state and do not independently verify claims. Private attachment contents and paths are not included.</p><div class="table-wrap"><table><thead><tr><th>Title</th><th>Type</th><th>Dimension</th><th>Source</th><th>Date</th><th>Verification</th></tr></thead><tbody>{evidence_html}</tbody></table></div></section>
 <section><h2>Recommendations</h2>{_recommendation_html(recommendations)}</section>
 <section><h2>Assessment Limitations</h2><p class="disclaimer">{escape(DISCLAIMER)}</p><p><strong>Rubric version:</strong> {escape(result.rubric_version)}<br><strong>Assessment date:</strong> {_text(report_date)}</p></section>
 </main></body></html>"""
