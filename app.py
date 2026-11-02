@@ -2,6 +2,7 @@
 
 import re
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import plotly.graph_objects as go
@@ -558,8 +559,8 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
 
             cur_ext: ExtractionResult | None = st.session_state.get(f"ext_text_{doc_upload.name}")
             if cur_ext and cur_ext.text:
-                with st.expander("Preview Extracted Text", expanded=False):
-                    st.text_area("Extracted Content", value=cur_ext.text, height=200, key=f"preview_text_{doc_upload.name}", disabled=True)
+                st.markdown("##### Preview Extracted Text")
+                st.text_area("Extracted Content", value=cur_ext.text, height=180, key=f"preview_text_{doc_upload.name}", disabled=True)
 
             cur_analysis: DocumentAnalysisResult | None = st.session_state.get(f"doc_analysis_{doc_upload.name}")
             if cur_analysis:
@@ -579,7 +580,7 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
 
                         col_act1, col_act2 = st.columns([2, 5])
                         with col_act1:
-                            if claim.approval_status != STATUS_APPROVED:
+                            if claim.approval_status != STATUS_APPROVED and claim.approval_status != STATUS_REJECTED:
                                 if st.button(f"Approve & Register Claim #{c_idx + 1}", key=f"app_doc_claim_{c_idx}"):
                                     # Save to evidence registry safely
                                     # Also store the uploaded attachment if not yet stored
@@ -592,7 +593,8 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
 
                                     save_evidence(profile, {
                                         "evidence_title": claim.claim_title,
-                                        "evidence_description": f"{claim.claim_description}\n\n[Excerpt]: \"{claim.supporting_excerpt}\"",
+                                        "evidence_description": claim.claim_description,
+                                        "supporting_excerpt": claim.supporting_excerpt,
                                         "evidence_type": claim.evidence_type,
                                         "related_dimension": claim.related_dimension,
                                         "source_name": doc_upload.name,
@@ -605,17 +607,25 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
                                     claim.approval_status = STATUS_APPROVED
                                     st.success(f"Registered claim #{c_idx + 1} into Evidence Registry!")
                                     st.rerun()
-                            else:
+                            elif claim.approval_status == STATUS_APPROVED:
                                 st.caption("✅ Approved & Registered")
+                            elif claim.approval_status == STATUS_REJECTED:
+                                st.caption("❌ Rejected")
+                        with col_act2:
+                            if claim.approval_status != STATUS_APPROVED and claim.approval_status != STATUS_REJECTED:
+                                if st.button(f"Reject Claim #{c_idx + 1}", key=f"rej_doc_claim_{c_idx}"):
+                                    claim.approval_status = STATUS_REJECTED
+                                    st.info(f"Rejected claim #{c_idx + 1}.")
+                                    st.rerun()
 
                 if cur_analysis.missing_evidence_gaps:
                     st.markdown("---")
                     st.markdown("#### ⚠️ Document Validation Gaps")
                     for gap in cur_analysis.missing_evidence_gaps:
-                        with st.expander(f"{gap.dimension} — {gap.missing_information}"):
-                            st.write(f"**Why it matters:** {gap.why_it_matters}")
-                            st.write(f"**Follow-up Question:** {gap.suggested_question}")
-                            st.write(f"**Suggested Evidence:** {gap.suggested_evidence}")
+                        st.markdown(f"**{gap.dimension} — {gap.missing_information}**")
+                        st.write(f"- Why it matters: {gap.why_it_matters}")
+                        st.write(f"- Follow-up question: {gap.suggested_question}")
+                        st.write(f"- Suggested evidence: {gap.suggested_evidence}")
 
     st.markdown("---")
     with st.expander("Add manual evidence", expanded=False):
@@ -669,6 +679,8 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
     for record in records:
         with st.expander(f"{record['evidence_title']} — {record['related_dimension']} — {record['verification_status']}"):
             st.write(record["evidence_description"])
+            if record.get("supporting_excerpt"):
+                st.caption(f"**Supporting Excerpt:** \"{record['supporting_excerpt']}\"")
             st.caption(f"Type: {record['evidence_type']} | Source: {record['source_name'] or 'Not provided'} | Submitted: {record['submission_date']}")
             if record.get("attachment_original_name"):
                 st.caption(f"Attachment: {record['attachment_original_name']} (stored privately)")

@@ -1,11 +1,14 @@
 """Evidence registry and secure attachment tests using temporary storage."""
 
+from pathlib import Path
+
 import pytest
 
 from database import (
     EVIDENCE_TYPES, VERIFICATION_STATUSES, archive_evidence, ensure_startup,
-    get_assessment, get_evidence, initialize_database, list_evidence, save_assessment,
-    save_evidence, store_attachment, update_evidence, validate_attachment,
+    create_user, create_workspace, get_assessment, get_evidence, initialize_database,
+    list_evidence, save_assessment, save_evidence, store_attachment, update_evidence,
+    validate_attachment,
 )
 from recommendations import generate_recommendations
 from scoring import DIMENSIONS, calculate_assessment
@@ -142,6 +145,53 @@ def test_attachment_security_and_edge_cases(tmp_path):
     assert (private_dir / stored_name).exists()
 
 
+def test_attachment_access_is_scoped_to_the_owner_and_workspace(tmp_path):
+    path = tmp_path / "ownership.db"
+    attachment_dir = tmp_path / "attachments"
+    initialize_database(path)
+
+    user_a = create_user("User A", "a@example.test", "hash-a", path)
+    user_b = create_user("User B", "b@example.test", "hash-b", path)
+    workspace_a = create_workspace(user_a, "A Workspace", path=path)
+    workspace_b = create_workspace(user_b, "B Workspace", path=path)
+    profile_a = profile("Private Attachment Co")
+    attachment_name, original_name, size = store_attachment(
+        "private-proof.docx", b"USER-A-PRIVATE-CONTENT", attachment_dir
+    )
+    evidence_id = save_evidence(
+        profile_a,
+        evidence(
+            evidence_title="Private document evidence",
+            attachment_path=attachment_name,
+            attachment_original_name=original_name,
+            attachment_size=size,
+        ),
+        path,
+        workspace_id=workspace_a,
+        user_id=user_a,
+    )
+
+    # The owner can resolve the record and read the stored file through the
+    # trusted storage location used by the application.
+    owner_record = get_evidence(evidence_id, path, user_id=user_a)
+    assert owner_record is not None
+    assert (attachment_dir / owner_record["attachment_path"]).read_bytes() == b"USER-A-PRIVATE-CONTENT"
+
+    # A different user cannot resolve the evidence by ID, even when they know
+    # the identifier and the other user's workspace exists.
+    assert get_evidence(evidence_id, path, user_id=user_b) is None
+    assert list_evidence(startup_id=owner_record["startup_id"], user_id=user_b, path=path) == []
+    assert workspace_b != workspace_a
+
+    # The original filename and traversal-like names never become a storage
+    # path; missing files also fail closed at the storage layer.
+    assert Path(attachment_name).name == attachment_name
+    traversal_name, _, _ = store_attachment("..\\..\\outside.txt", b"safe", attachment_dir)
+    assert (attachment_dir / traversal_name).resolve().parent == attachment_dir.resolve()
+    missing_path = attachment_dir / "does-not-exist.docx"
+    assert not missing_path.exists()
+
+
 def test_historical_report_with_evidence_snapshots(tmp_path):
     path = tmp_path / "startup.db"
     p = profile("Historical Report Co")
@@ -162,4 +212,69 @@ def test_historical_report_with_evidence_snapshots(tmp_path):
     assert "Mutated Pilot Data" not in html_report
     assert "Independently verified" in html_report
 
+
+def test_supporting_excerpt_persistence_and_snapshots(tmp_path):
+    path = tmp_path / "supporting_excerpt_test.db"
+    initialize_database(path)
+    p = profile("Excerpt Co")
+
+    # 1. Save evidence with supporting_excerpt
+    ev = evidence(
+        evidence_title="Beta Cohort Feedback",
+        evidence_description="Feedback from 40 pilot users.",
+        supporting_excerpt="40 pilot users reported 80% time saved",
+    )
+    ev_id = save_evidence(p, ev, path)
+
+    # 2. Retrieve evidence and verify exact excerpt
+    retrieved = get_evidence(ev_id, path)
+    assert retrieved is not None
+    assert retrieved["supporting_excerpt"] == "40 pilot users reported 80% time saved"
+
+    # 3. List evidence and verify excerpt
+    listed = list_evidence(p, path=path)
+    assert len(listed) == 1
+    assert listed[0]["supporting_excerpt"] == "40 pilot users reported 80% time saved"
+
+    # 4. Update evidence without accidentally losing the excerpt
+    assert update_evidence(ev_id, {"verification_status": "Reviewed by founder"}, path)
+    after_update = get_evidence(ev_id, path)
+    assert after_update["verification_status"] == "Reviewed by founder"
+    assert after_update["supporting_excerpt"] == "40 pilot users reported 80% time saved"
+
+    # 5. Preserve the excerpt in historical evidence snapshots
+    inputs, result, recommendations = snapshot()
+    assessment_id = save_assessment(p, inputs, result, recommendations, "2026-10-31", path, [ev_id])
+
+    # Mutate live excerpt or notes
+    update_evidence(ev_id, {"supporting_excerpt": "Mutated excerpt", "founder_notes": "New note"}, path)
+
+    # Check historical assessment snapshot preserves original excerpt
+    historical = get_assessment(assessment_id, path)
+    assert len(historical["evidence"]) == 1
+    assert historical["evidence"][0]["supporting_excerpt"] == "40 pilot users reported 80% time saved"
+
+    # Check report generation includes the supporting excerpt
+    from report_generator import generate_report
+    report_html = generate_report(historical["profile"], historical["result"], historical["recommendations"], historical["assessment_date"], historical["evidence"])
+    assert "40 pilot users reported 80% time saved" in report_html
+    assert "Supporting Excerpt" in report_html
+
+
+def test_migration_is_additive_and_repeatable(tmp_path):
+    path = tmp_path / "migration_test.db"
+    # First init
+    initialize_database(path)
+    p = profile("Migrate Co")
+    ev_id = save_evidence(p, evidence(evidence_title="Pre-migration item", supporting_excerpt="Pre-migration excerpt"), path)
+
+    # Re-run initialize_database (triggers _migrate_existing_schema)
+    initialize_database(path)
+    initialize_database(path)
+
+    # Verify pre-existing records intact
+    saved = get_evidence(ev_id, path)
+    assert saved is not None
+    assert saved["evidence_title"] == "Pre-migration item"
+    assert saved["supporting_excerpt"] == "Pre-migration excerpt"
 

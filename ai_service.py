@@ -280,6 +280,38 @@ def heuristic_extract_startup_idea(text: str) -> AnalysisResult:
     if rev_match:
         revenue = rev_match.group(0).strip()
 
+    # Cash requirements extraction (conservative; only when explicitly stated as capital/funding needed)
+    cash_req = ""
+    curr_amount_pattern = r"(?:[\$€£₹¥]|(?:USD|EUR|GBP|INR|CAD|AUD)\s*)\s*\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:million|billion|lakh|crore|mn|k|m|b))\b|\d+(?:,\d{3})*(?:\.\d+)?\s*(?:million|billion|lakh|crore|mn|k|m|b)?\s*(?:[\$€£₹¥]|USD|EUR|GBP|INR|CAD|AUD)\b|(?:[\$€£₹¥]|(?:USD|EUR|GBP|INR|CAD|AUD)\s*)\s*\d+(?:,\d{3})*(?:\.\d+)?\b"
+    cash_patterns = [
+        # 1. 'We need/require/seeking/raising $500,000 for clinical trials...'
+        r"(?i)\b(?:we\s+)?(?:need|needs|require|requires|seeking|raising|look(?:ing)?\s+for|target(?:ing)?)\s+(?:to\s+raise\s+)?(?:around|approx(?:imately)?|about)?\s*(" + curr_amount_pattern + r")(?:[^\.\n;]*?(?:for|in|as|towards|to\s+fund)\s+[^\.\n;]+)?",
+        # 2. '$500,000 required in seed funding' / 'INR 25 lakh needed for...'
+        r"(?i)(" + curr_amount_pattern + r")\s+(?:is\s+)?(?:required|needed|sought|to\s+be\s+raised)(?:\s+(?:in|for|as|of)\s+[^\.\n;]+)?",
+        # 3. 'Capital requirement: $500,000' / 'Funding required: INR 25 lakh' / 'Cash requirements: ...'
+        r"(?i)\b(?:capital|funding|cash|investment|runway)\s+(?:requirements?|needed|required|ask|target|goal)\s*[:=-]\s*(" + curr_amount_pattern + r"(?:[^\.\n;]+)?)",
+    ]
+    for s in sentences:
+        s_lower = s.lower()
+        if "valuation" in s_lower or "valued at" in s_lower:
+            if not any(k in s_lower for k in ["need", "require", "seeking", "raising", "funding needed", "capital required"]):
+                continue
+        if any(p in s_lower for p in ["raised last", "already raised", "previously raised", "have raised"]) and not any(k in s_lower for k in ["seeking", "raising now", "require", "need"]):
+            continue
+        if any(p in s_lower for p in ["/month", "per month", "subscription", "charge", "pricing", "annual revenue", "revenue is"]) and not any(k in s_lower for k in ["funding", "capital", "trials", "runway", "raise", "seeking", "require", "need"]):
+            continue
+        for pat in cash_patterns:
+            m = re.search(pat, s)
+            if m:
+                matched = m.group(0).strip()
+                matched_lower = matched.lower()
+                if "valuation" in matched_lower or "subscription" in matched_lower:
+                    continue
+                cash_req = matched
+                break
+        if cash_req:
+            break
+
     # Build field mapping
     values_map = {
         "startup_name": (name, name != "Unnamed Venture"),
@@ -302,7 +334,7 @@ def heuristic_extract_startup_idea(text: str) -> AnalysisResult:
         "acquisition": ("", False),
         "estimated_costs": ("", False),
         "revenue_assumptions": ("", False),
-        "cash_requirements": ("", False),
+        "cash_requirements": (cash_req, bool(cash_req)),
         "traction": ("", False),
         "business_risks": ("", False),
         "technical_operational_risks": ("", False),

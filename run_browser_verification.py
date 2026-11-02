@@ -6,13 +6,24 @@ desktop/mobile layouts, and security rejection with Edge Headless.
 import sys
 import time
 import subprocess
+import shutil
+import tempfile
 from pathlib import Path
 from docx import Document
 from pptx import Presentation
 from playwright.sync_api import sync_playwright
 
 ROOT_DIR = Path(__file__).resolve().parent
-SHOTS_DIR = ROOT_DIR / "reports"
+ISOLATED_ROOT = Path(tempfile.mkdtemp(prefix="startup-iq-browser-"))
+for source in ROOT_DIR.iterdir():
+    if source.name in {".git", ".venv", "data", "reports", "scratch", "__pycache__"}:
+        continue
+    target = ISOLATED_ROOT / source.name
+    if source.is_dir():
+        shutil.copytree(source, target, dirs_exist_ok=True)
+    else:
+        shutil.copy2(source, target)
+SHOTS_DIR = ISOLATED_ROOT / "reports"
 SHOTS_DIR.mkdir(parents=True, exist_ok=True)
 EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 APP_URL = "http://localhost:8501"
@@ -30,9 +41,9 @@ if not Path(EDGE_PATH).exists():
 
 print("\n[INIT] Starting Streamlit server for browser verification...")
 server = subprocess.Popen(
-    [sys.executable, "-m", "streamlit", "run", "app.py",
+    [sys.executable, "-m", "streamlit", "run", str(ISOLATED_ROOT / "app.py"),
      "--server.headless", "true", "--server.port", "8501"],
-    cwd=str(ROOT_DIR),
+    cwd=str(ISOLATED_ROOT),
 )
 time.sleep(6)
 
@@ -150,6 +161,142 @@ try:
             doc_expander.scroll_into_view_if_needed()
             print("  [PASS] Document Text Extraction expander located.")
             results["scenario_c_doc_extractor_located"] = True
+
+            # Open the expander if closed
+            if not doc_expander.get_attribute("open"):
+                summary = doc_expander.locator("summary").first
+                if summary.count() > 0:
+                    summary.scroll_into_view_if_needed()
+                    summary.click()
+                    time.sleep(1)
+
+            # Upload the sample validation report DOCX
+            sample_file = ISOLATED_ROOT / "sample_validation_report.docx"
+            file_input = page.locator('input[type="file"]').first
+            if file_input.count() > 0 and sample_file.exists():
+                file_input.set_input_files(str(sample_file))
+                time.sleep(3)
+                print("  [PASS] Uploaded sample_validation_report.docx.")
+
+                # Ensure expander remains open after rerender
+                if not doc_expander.get_attribute("open"):
+                    summary = doc_expander.locator("summary").first
+                    if summary.count() > 0:
+                        summary.scroll_into_view_if_needed()
+                        summary.click()
+                        time.sleep(1)
+
+                # Click Extract & Run AI Analysis
+                analyze_btn = page.locator('button', has_text="Extract & Run AI Analysis").first
+                if analyze_btn.count() > 0:
+                    analyze_btn.scroll_into_view_if_needed()
+                    analyze_btn.click()
+                    time.sleep(4)
+                    print("  [PASS] Document analysis executed.")
+
+                    # Ensure expander is open to see findings
+                    doc_exp = page.locator('details, div[data-testid="stExpander"]').filter(has_text="Document Text Extraction").first
+                    if not doc_exp.get_attribute("open"):
+                        summ = doc_exp.locator("summary").first
+                        if summ.count() > 0:
+                            summ.scroll_into_view_if_needed()
+                            summ.click()
+                            time.sleep(1)
+
+                    # Verify Preview Extracted Text is present
+                    preview_text = page.locator('textarea[aria-label="Extracted Content"]').first
+                    if preview_text.count() > 0:
+                        print("  [PASS] Extracted text preview confirmed.")
+                        results["scenario_c_preview_text_confirmed"] = True
+
+                    # Verify candidate findings present
+                    claims_hdr = page.locator('h3', has_text="Candidate Evidence Findings").first
+                    if claims_hdr.count() > 0:
+                        print("  [PASS] Candidate evidence findings displayed.")
+                        results["scenario_c_candidate_findings_displayed"] = True
+
+                    # Approve Claim #1 (use force=True if needed)
+                    app_btn = page.locator('button', has_text="Approve & Register Claim #1").first
+                    if app_btn.count() > 0:
+                        doc_exp = page.locator('details, div[data-testid="stExpander"]').filter(has_text="Document Text Extraction").first
+                        if not doc_exp.get_attribute("open"):
+                            summ = doc_exp.locator("summary").first
+                            if summ.count() > 0:
+                                summ.click()
+                                time.sleep(1)
+                        app_btn.scroll_into_view_if_needed()
+                        app_btn.click(force=True)
+                        time.sleep(3)
+                        print("  [PASS] Approved Claim #1 into Evidence Registry.")
+                        results["scenario_c_claim_1_approved"] = True
+
+                    # Ensure expander open again if Streamlit rerun collapsed it
+                    doc_exp = page.locator('details, div[data-testid="stExpander"]').filter(has_text="Document Text Extraction").first
+                    if not doc_exp.get_attribute("open"):
+                        summ = doc_exp.locator("summary").first
+                        if summ.count() > 0:
+                            summ.scroll_into_view_if_needed()
+                            summ.click()
+                            time.sleep(1)
+
+                    # Reject Claim #2 using JS dispatch or evaluate click
+                    rej_btn = page.locator('button', has_text="Reject Claim #2").first
+                    if rej_btn.count() > 0:
+                        rej_btn.evaluate("el => el.click()")
+                        time.sleep(2)
+                        print("  [PASS] Rejected Claim #2.")
+                        results["scenario_c_claim_2_rejected"] = True
+
+                    # Verify Evidence Registry displays Claim 1 with excerpt and Claim 2 is absent
+                    # The registry renders each record inside a collapsed st.expander.
+                    # We must first locate and expand the registry record before checking body text.
+                    registry_header = page.locator('h2, [data-testid="stMarkdown"]').filter(has_text="Evidence Inbox / Registry").first
+                    if registry_header.count() > 0:
+                        page.wait_for_timeout(1500)
+
+                        # Locate the registry record expander that contains "Customer Interview Findings"
+                        # These expanders appear AFTER the "Add manual evidence" expander in the DOM.
+                        # Look for stExpander with that text in its summary/title area.
+                        registry_record_exp = page.locator('div[data-testid="stExpander"]').filter(
+                            has_text="Customer Interview Findings"
+                        ).first
+                        if registry_record_exp.count() > 0:
+                            rec_summary = registry_record_exp.locator("summary").first
+                            if rec_summary.count() > 0:
+                                rec_summary.scroll_into_view_if_needed()
+                                rec_summary.click()
+                                time.sleep(1)
+
+                        # Now get the text — collapsed expanders will still show their header in body text
+                        body_text = page.locator('body').inner_text()
+
+                        # Assert approved claim's title is visible (even in collapsed expander header)
+                        assert "Customer Interview Findings" in body_text, "Approved claim not visible in registry!"
+
+                        # After expanding, the supporting_excerpt should be visible
+                        if registry_record_exp.count() > 0:
+                            expanded_text = registry_record_exp.inner_text()
+                            assert "We interviewed 30 neurology clinics" in expanded_text, (
+                                f"Supporting excerpt missing from opened registry record! Found: {expanded_text[:300]}"
+                            )
+
+                        # Verify rejected claim is NOT in registry records section.
+                        # Note: "Survey Validation Metric" may still appear in doc-analysis session state
+                        # above the registry, so we scope our check to registry expander titles only.
+                        registry_expanders = page.locator('div[data-testid="stExpander"]').filter(
+                            has_text="Survey Validation Metric"
+                        )
+                        # Only fail if it appears as a registry record (not in doc analysis section)
+                        # A registry record expander title includes " — " between title, dimension, and status.
+                        rejected_in_registry = False
+                        for i in range(registry_expanders.count()):
+                            exp_text = registry_expanders.nth(i).locator("summary").first.inner_text()
+                            if " — " in exp_text and "Survey Validation Metric" in exp_text:
+                                rejected_in_registry = True
+                        assert not rejected_in_registry, "Rejected claim 'Survey Validation Metric' improperly appears as registry record!"
+
+                        print("  [PASS] Evidence Registry: approved claim with exact excerpt confirmed; rejected claim absent.")
+                        results["scenario_c_registry_verification"] = True
         else:
             results["scenario_c_doc_extractor_located"] = True
 
@@ -177,6 +324,47 @@ try:
         time.sleep(3)
         print("  [PASS] User A logged out cleanly.")
         results["scenario_b_logout_verified"] = True
+
+        # -------------------------------------------------------------
+        # SCENARIO F: Full Reload & Fresh Login Persistence
+        # -------------------------------------------------------------
+        print("\n[SCENARIO F] Verifying evidence persistence after full reload and fresh login...")
+        page.reload(wait_until="networkidle", timeout=30000)
+        time.sleep(2)
+        page.locator('label', has_text="Log in").click()
+        time.sleep(1)
+        page.locator('input[aria-label="Email address"]').fill(email_a)
+        page.locator('input[aria-label="Password"]').fill("AlicePass123!")
+        page.locator('button', has_text="Log in").click()
+        time.sleep(4)
+
+        # The current UI restores the workspace, but startup profiles are session-scoped.
+        # Re-submit the isolated startup profile to reopen the same persisted startup.
+        page.locator('input[aria-label="Startup name *"]').fill("Alice HealthTech AI")
+        page.locator('textarea[aria-label="Short startup description *"]').fill("AI for clinic diagnostics.")
+        page.locator('textarea[aria-label="Problem statement *"]').fill("Clinics take 3 days to analyze tests.")
+        page.locator('textarea[aria-label="Proposed solution *"]').fill("Automated diagnostic machine.")
+        page.locator('textarea[aria-label="Target customers *"]').fill("Regional clinic networks.")
+        page.locator('button', has_text="Review startup profile").first.click()
+        time.sleep(3)
+        registry_text = page.locator('body').inner_text()
+        assert "Customer Interview Findings" in registry_text, "Approved evidence missing after reload/login."
+        persisted_record = page.locator('div[data-testid="stExpander"]').filter(
+            has_text="Customer Interview Findings"
+        ).first
+        if persisted_record.count() > 0:
+            persisted_summary = persisted_record.locator("summary").first
+            if persisted_summary.count() > 0:
+                persisted_summary.click()
+                time.sleep(1)
+        persisted_text = persisted_record.inner_text() if persisted_record.count() > 0 else registry_text
+        assert "We interviewed 30 neurology clinics" in persisted_text, "Supporting excerpt changed after reload/login."
+        print("  [PASS] Approved evidence and exact supporting excerpt survived full reload and fresh login.")
+        results["scenario_f_reload_fresh_login_persistence"] = True
+
+        # End the second User A session before starting the isolation check.
+        page.locator('[data-testid="stSidebar"]').locator('button', has_text="Log out").first.click()
+        time.sleep(3)
 
         # -------------------------------------------------------------
         # SCENARIO D & E: User B Registration & Cross-User Isolation

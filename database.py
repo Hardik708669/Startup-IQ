@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS evidence_records (
     submission_date TEXT NOT NULL,
     verification_status TEXT NOT NULL,
     founder_notes TEXT,
+    supporting_excerpt TEXT,
     attachment_path TEXT,
     attachment_original_name TEXT,
     attachment_size INTEGER,
@@ -207,6 +208,8 @@ def _migrate_existing_schema(connection: sqlite3.Connection) -> None:
             connection.execute("ALTER TABLE evidence_records ADD COLUMN workspace_id INTEGER REFERENCES workspaces(workspace_id) ON DELETE CASCADE")
         if "user_id" not in table_columns["evidence_records"]:
             connection.execute("ALTER TABLE evidence_records ADD COLUMN user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL")
+        if "supporting_excerpt" not in table_columns["evidence_records"]:
+            connection.execute("ALTER TABLE evidence_records ADD COLUMN supporting_excerpt TEXT")
 
     # Alter generated_documents table if missing columns
     if "generated_documents" in table_columns:
@@ -495,7 +498,9 @@ def save_evidence(
         str(evidence["related_dimension"]).strip(), str(evidence.get("source_name") or "").strip(),
         str(evidence.get("source_url") or "").strip(), str(evidence.get("source_date") or "").strip(),
         str(evidence.get("submission_date") or date.today().isoformat()), evidence["verification_status"],
-        str(evidence.get("founder_notes") or "").strip(), evidence.get("attachment_path"),
+        str(evidence.get("founder_notes") or "").strip(),
+        str(evidence.get("supporting_excerpt") or "").strip() or None,
+        evidence.get("attachment_path"),
         evidence.get("attachment_original_name"), evidence.get("attachment_size"), now, now
     )
     initialize_database(path)
@@ -504,8 +509,8 @@ def save_evidence(
             """INSERT INTO evidence_records
             (evidence_id, startup_id, workspace_id, user_id, evidence_title, evidence_description, evidence_type,
              related_dimension, source_name, source_url, source_date, submission_date, verification_status,
-             founder_notes, attachment_path, attachment_original_name, attachment_size, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             founder_notes, supporting_excerpt, attachment_path, attachment_original_name, attachment_size, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             values
         )
     return evidence_id
@@ -608,7 +613,7 @@ def update_evidence(
     _validate_evidence_fields(merged)
     allowed = {
         "evidence_title", "evidence_description", "evidence_type", "related_dimension", "source_name",
-        "source_url", "source_date", "verification_status", "founder_notes", "attachment_path",
+        "source_url", "source_date", "verification_status", "founder_notes", "supporting_excerpt", "attachment_path",
         "attachment_original_name", "attachment_size"
     }
     fields = [(key, merged[key]) for key in allowed if key in changes]

@@ -178,4 +178,43 @@ def test_evidence_suggestions_integration_with_db(tmp_path):
     listed = list_evidence(profile, path=path)
     assert len(listed) == 1
     assert listed[0]["evidence_id"] == ev_id
+    assert listed[0]["supporting_excerpt"] == "Interviewed 30 neurology clinics"
 
+
+def test_heuristic_cash_requirements_regression():
+    # 1. $500,000 required in seed funding -> amount extracted
+    res1 = heuristic_extract_startup_idea("We are building TechCorp. $500,000 required in seed funding.")
+    f1 = {f.field_key: f for f in res1.fields}
+    assert "$500,000" in f1["cash_requirements"].suggested_value
+    assert f1["cash_requirements"].supporting_text != ""
+    assert f1["cash_requirements"].is_inferred is False
+
+    # 2. We require INR 25 lakh in initial capital -> amount extracted
+    res2 = heuristic_extract_startup_idea("We require INR 25 lakh in initial capital to scale operations.")
+    f2 = {f.field_key: f for f in res2.fields}
+    assert "INR 25 lakh" in f2["cash_requirements"].suggested_value
+    assert f2["cash_requirements"].is_inferred is False
+
+    # 3. $99 monthly subscription -> must not be identified as cash requirements
+    res3 = heuristic_extract_startup_idea("We charge a $99 monthly subscription for our B2B software tool.")
+    f3 = {f.field_key: f for f in res3.fields}
+    assert f3["cash_requirements"].suggested_value == ""
+    assert f3["cash_requirements"].is_inferred is True
+
+    # 4. $5 million company valuation -> must not be identified as cash requirements
+    res4 = heuristic_extract_startup_idea("We are an early stage startup with a $5 million company valuation.")
+    f4 = {f.field_key: f for f in res4.fields}
+    assert f4["cash_requirements"].suggested_value == ""
+    assert f4["cash_requirements"].is_inferred is True
+
+    # 5. No funding figure in the document -> field remains empty
+    res5 = heuristic_extract_startup_idea("We are building PetSocial for dog owners to connect in parks.")
+    f5 = {f.field_key: f for f in res5.fields}
+    assert f5["cash_requirements"].suggested_value == ""
+    assert f5["cash_requirements"].is_inferred is True
+
+    # 6. Extracted values retain their correct supporting source text
+    res6 = heuristic_extract_startup_idea("We need $500,000 for clinical trials and hardware certification.")
+    f6 = {f.field_key: f for f in res6.fields}
+    assert "$500,000" in f6["cash_requirements"].suggested_value
+    assert f6["cash_requirements"].supporting_text == f6["cash_requirements"].suggested_value
