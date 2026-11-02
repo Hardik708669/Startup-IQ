@@ -18,6 +18,16 @@ Startup IQ provides an optional AI-assisted natural-language understanding layer
 - **Strict Separation from Scoring**: AI **never** computes or alters numeric scores, nor does it modify dimension weights. Numerical readiness remains 100% deterministic.
 - **Zero-Dependency Resilience**: External providers (OpenAI, Gemini) are supported via `AI_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`. If keys are absent or network errors/timeouts occur, Startup IQ gracefully uses a high-performance local heuristic extraction engine without failing. Manual profile entry remains 100% functional without AI.
 
+## Document Text Extraction & AI Evidence Analysis
+
+Founders can upload supporting validation documents to extract textual evidence and identify validation gaps:
+- **Supported Formats**: Text-based PDF (`.pdf` via `pypdf`), Word (`.docx` via `python-docx`), Plain Text (`.txt` supporting UTF-8, Latin-1, and UTF-16), CSV spreadsheets (`.csv`), and Excel workbooks (`.xlsx` via `openpyxl`).
+- **Configurable Safety Limits**: Max 10 MB per file, max 50,000 characters per document, max 100 rows per spreadsheet/table.
+- **Candidate Claim Identification**: Automatically identifies customer interview quotes, survey metrics, LOIs and pilot contracts, financial and pricing assumptions, and competitor benchmarks.
+- **Supporting Excerpts**: Every extracted claim maintains an exact quotation/excerpt from the uploaded document to prevent fabrication.
+- **Human-in-the-Loop Confirmation**: Founders inspect the extracted text preview and individual claims. Each claim can be approved or rejected. Approved claims are automatically saved into the Evidence Registry with the uploaded file associated as an attachment.
+- **Zero-Dependency Resilience**: Works out of the box using a local heuristic pattern matching engine without requiring external LLM API keys.
+
 ## Evidence Inbox / Registry
 
 The Evidence Inbox stores structured evidence separately from assessment ratings. Records include a title, claim/description, category, related rubric dimension, source details, evidence date, founder notes, and a verification status. Supported categories include customer interviews, surveys, market and competitor research, financial assumptions, pricing validation, letters of intent, pilots, benchmarks, legal/regulatory research, technical documentation, and custom categories.

@@ -569,3 +569,323 @@ def analyze_startup_idea(
         logger.warning(f"{err_msg}; falling back to heuristic engine.")
         fallback = heuristic_extract_startup_idea(clean_text)
         return fallback, f"{err_msg} (used local heuristic fallback)"
+
+
+
+# ---------------------------------------------------------------------------
+# Document Text Analysis & Evidence Claim Extraction
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DocumentEvidenceClaim:
+    """A candidate evidence claim extracted from an uploaded document."""
+    claim_title: str
+    claim_description: str
+    evidence_type: str
+    related_dimension: str
+    supporting_excerpt: str
+    source_document: str
+    is_directly_stated: bool = True
+    confidence: str = "High"  # High, Medium, Low
+    recommended_verification: str = "Verify source document and founder notes"
+    approval_status: str = STATUS_PENDING  # Pending review, Approved, Rejected
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DocumentAnalysisResult:
+    """Result of analyzing an extracted document text for startup evidence."""
+    source_filename: str
+    claims: list[DocumentEvidenceClaim] = field(default_factory=list)
+    missing_evidence_gaps: list[MissingInfoItem] = field(default_factory=list)
+    document_summary: str = ""
+    provider_used: str = "heuristic"
+    error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "source_filename": self.source_filename,
+            "claims": [c.as_dict() for c in self.claims],
+            "missing_evidence_gaps": [g.as_dict() for g in self.missing_evidence_gaps],
+            "document_summary": self.document_summary,
+            "provider_used": self.provider_used,
+            "error": self.error,
+        }
+
+
+def analyze_extracted_document(
+    document_text: str,
+    source_filename: str,
+    *,
+    startup_profile: Mapping[str, Any] | None = None,
+    api_key: str | None = None,
+    provider: str | None = None,
+    timeout: int = 25,
+) -> DocumentAnalysisResult:
+    """Analyze extracted document text and return structured candidate evidence claims.
+
+    If AI credentials are not configured, uses deterministic heuristic evidence extraction.
+    """
+    clean_text = document_text.strip()
+    if not clean_text:
+        return DocumentAnalysisResult(
+            source_filename=source_filename,
+            error="Document contains no text to analyze.",
+        )
+
+    active_key = api_key or AI_API_KEY or os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
+    active_provider = provider or os.getenv("AI_PROVIDER", "auto").lower()
+
+    if not active_key:
+        logger.info("No AI key available for document analysis; running local heuristic analyzer.")
+        return heuristic_analyze_document(clean_text, source_filename, startup_profile=startup_profile)
+
+    # Prompt for LLM document analysis
+    prompt = f"""You are Startup IQ's Document Validation Analyst.
+Analyze the following extracted text from document '{source_filename}'.
+Extract candidate startup validation evidence claims.
+
+IMPORTANT INSTRUCTIONS:
+1. Extract real claims mentioned in the text (interviews, surveys, pilot tests, LOIs, financials, market data, benchmarks).
+2. DO NOT fabricate claims. Every claim must have an exact supporting excerpt from the text.
+3. Classify evidence_type into one of: 'Customer interviews', 'Customer survey results', 'Market research', 'Competitor research', 'Financial assumptions', 'Pricing validation', 'Letters of intent', 'Pilot results', 'Product benchmarks', 'Legal or regulatory research', 'Technical documentation', 'Other'.
+4. Map to one of the 7 dimensions: 'Market Potential', 'Problem & Solution Clarity', 'Competitive Position', 'Business Model', 'Financial Readiness', 'Risk Management', 'Pitch Readiness'.
+5. Identify evidence gaps (missing methodology, unverified numbers, missing baselines).
+
+Respond ONLY with valid JSON in this exact structure:
+{{
+  "document_summary": "1-2 sentence objective summary of the document",
+  "claims": [
+    {{
+      "claim_title": "Short title",
+      "claim_description": "Detailed description of claim",
+      "evidence_type": "Customer interviews",
+      "related_dimension": "Problem & Solution Clarity",
+      "supporting_excerpt": "Exact quotation from document",
+      "is_directly_stated": true,
+      "confidence": "High",
+      "recommended_verification": "Review sample interview recording or transcript"
+    }}
+  ],
+  "missing_evidence_gaps": [
+    {{
+      "section": "Validation Gap",
+      "dimension": "Market Potential",
+      "missing_information": "Sample size for survey was not disclosed",
+      "why_it_matters": "Small sample sizes reduce statistical significance",
+      "suggested_question": "How many participants completed the survey?",
+      "suggested_evidence": "Survey participant demographic and count table"
+    }}
+  ]
+}}
+
+Document Text:
+{clean_text[:18000]}
+"""
+
+    try:
+        if active_provider == "gemini" or (active_provider == "auto" and active_key.startswith("AIza")):
+            raw_json = _call_gemini_api(active_key, prompt, timeout=timeout)
+        else:
+            raw_json = _call_openai_api(active_key, prompt, timeout=timeout)
+
+        return parse_document_analysis_json(raw_json, source_filename, provider_name=active_provider)
+    except Exception as exc:
+        logger.warning(f"AI Document analysis API failed: {exc}; falling back to heuristic analyzer.")
+        fallback_res = heuristic_analyze_document(clean_text, source_filename, startup_profile=startup_profile)
+        fallback_res.error = f"AI Provider unavailable ({type(exc).__name__}). Performed local analysis."
+        return fallback_res
+
+
+def parse_document_analysis_json(raw_json: str, source_filename: str, provider_name: str) -> DocumentAnalysisResult:
+    """Parse JSON returned by LLM into DocumentAnalysisResult."""
+    try:
+        # Strip markdown code fence if present
+        cleaned = re.sub(r"^```(?:json)?\s*", "", raw_json.strip())
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        data = json.loads(cleaned)
+    except Exception:
+        # Fallback to heuristic if JSON is broken
+        return heuristic_analyze_document(raw_json, source_filename)
+
+    claims: list[DocumentEvidenceClaim] = []
+    for c in data.get("claims", []):
+        if c.get("claim_title") and c.get("claim_description"):
+            claims.append(
+                DocumentEvidenceClaim(
+                    claim_title=c.get("claim_title", "Evidence Claim"),
+                    claim_description=c.get("claim_description", ""),
+                    evidence_type=c.get("evidence_type", "Other"),
+                    related_dimension=c.get("related_dimension", "Market Potential"),
+                    supporting_excerpt=c.get("supporting_excerpt", ""),
+                    source_document=source_filename,
+                    is_directly_stated=c.get("is_directly_stated", True),
+                    confidence=c.get("confidence", "High"),
+                    recommended_verification=c.get("recommended_verification", "Verify founder documentation"),
+                )
+            )
+
+    gaps: list[MissingInfoItem] = []
+    for g in data.get("missing_evidence_gaps", []):
+        if g.get("missing_information"):
+            gaps.append(
+                MissingInfoItem(
+                    section=g.get("section", "Validation Gap"),
+                    dimension=g.get("dimension", "Market Potential"),
+                    missing_information=g.get("missing_information", ""),
+                    why_it_matters=g.get("why_it_matters", "Gaps affect investor credibility"),
+                    suggested_question=g.get("suggested_question", "Provide supporting evidence"),
+                    suggested_evidence=g.get("suggested_evidence", "Supporting document"),
+                )
+            )
+
+    return DocumentAnalysisResult(
+        source_filename=source_filename,
+        claims=claims,
+        missing_evidence_gaps=gaps,
+        document_summary=data.get("document_summary", ""),
+        provider_used=provider_name,
+    )
+
+
+def heuristic_analyze_document(
+    text: str,
+    source_filename: str,
+    *,
+    startup_profile: Mapping[str, Any] | None = None,
+) -> DocumentAnalysisResult:
+    """Deterministic, zero-dependency pattern matching to extract candidate evidence claims."""
+    claims: list[DocumentEvidenceClaim] = []
+    gaps: list[MissingInfoItem] = []
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    # 1. Customer interview findings
+    interview_pattern = re.compile(r"(interview|customer feedback|spoke with|founders interviewed|participants stated)", re.IGNORECASE)
+    for line in lines:
+        if interview_pattern.search(line) and len(line) > 20:
+            claims.append(
+                DocumentEvidenceClaim(
+                    claim_title="Customer Interview Findings",
+                    claim_description=f"Evidence of customer problem/feedback: {line[:120]}...",
+                    evidence_type="Customer interviews",
+                    related_dimension="Problem & Solution Clarity",
+                    supporting_excerpt=line[:250],
+                    source_document=source_filename,
+                    is_directly_stated=True,
+                    confidence="High",
+                    recommended_verification="Review interview transcripts and participant list",
+                )
+            )
+            break
+
+    # 2. Survey findings
+    survey_pattern = re.compile(r"(\b\d{1,3}%\b|survey of \d+|respondents|survey results)", re.IGNORECASE)
+    for line in lines:
+        if survey_pattern.search(line) and len(line) > 20:
+            claims.append(
+                DocumentEvidenceClaim(
+                    claim_title="Survey Validation Metric",
+                    claim_description=f"Survey metric identified: {line[:120]}...",
+                    evidence_type="Customer survey results",
+                    related_dimension="Market Potential",
+                    supporting_excerpt=line[:250],
+                    source_document=source_filename,
+                    is_directly_stated=True,
+                    confidence="High",
+                    recommended_verification="Verify survey distribution methodology and raw responses",
+                )
+            )
+            break
+
+    # 3. Pilot / LOI validation
+    pilot_pattern = re.compile(r"(pilot program|letters? of intent|signed LOI|trial customer|beta test)", re.IGNORECASE)
+    for line in lines:
+        if pilot_pattern.search(line) and len(line) > 20:
+            claims.append(
+                DocumentEvidenceClaim(
+                    claim_title="Pilot / LOI Traction Record",
+                    claim_description=f"Commercial validation agreement: {line[:120]}...",
+                    evidence_type="Pilot results" if "pilot" in line.lower() else "Letters of intent",
+                    related_dimension="Pitch Readiness",
+                    supporting_excerpt=line[:250],
+                    source_document=source_filename,
+                    is_directly_stated=True,
+                    confidence="High",
+                    recommended_verification="Inspect signed counter-party agreement or pilot KPI tracker",
+                )
+            )
+            break
+
+    # 4. Financial & pricing validation
+    financial_pattern = re.compile(r"(\$[\d,]+|\bpricing\b|\bgross margin\b|\bCAC\b|\bLTV\b|\bunit economics\b)", re.IGNORECASE)
+    for line in lines:
+        if financial_pattern.search(line) and len(line) > 15:
+            claims.append(
+                DocumentEvidenceClaim(
+                    claim_title="Financial & Pricing Assumption",
+                    claim_description=f"Financial metric stated in document: {line[:120]}...",
+                    evidence_type="Financial assumptions",
+                    related_dimension="Financial Readiness",
+                    supporting_excerpt=line[:250],
+                    source_document=source_filename,
+                    is_directly_stated=True,
+                    confidence="Medium",
+                    recommended_verification="Reconcile with financial spreadsheet model",
+                )
+            )
+            break
+
+    # 5. Competitor research
+    comp_pattern = re.compile(r"(competitor|alternative|vs\.|market advantage|moat|differentiat)", re.IGNORECASE)
+    for line in lines:
+        if comp_pattern.search(line) and len(line) > 20:
+            claims.append(
+                DocumentEvidenceClaim(
+                    claim_title="Competitive Advantage Benchmark",
+                    claim_description=f"Comparative assessment: {line[:120]}...",
+                    evidence_type="Competitor research",
+                    related_dimension="Competitive Position",
+                    supporting_excerpt=line[:250],
+                    source_document=source_filename,
+                    is_directly_stated=True,
+                    confidence="Medium",
+                    recommended_verification="Confirm feature comparisons against competitor websites",
+                )
+            )
+            break
+
+    # Gap detection
+    if not any(c.evidence_type == "Customer interviews" for c in claims):
+        gaps.append(
+            MissingInfoItem(
+                section="Validation Gap",
+                dimension="Problem & Solution Clarity",
+                missing_information="No direct customer interview quotes or qualitative evidence found in document",
+                why_it_matters="Direct customer feedback proves genuine problem urgency",
+                suggested_question="Have you conducted structured discovery interviews with at least 15 target users?",
+                suggested_evidence="Customer interview log with problem quotes",
+            )
+        )
+    if not any(c.evidence_type == "Financial assumptions" for c in claims):
+        gaps.append(
+            MissingInfoItem(
+                section="Validation Gap",
+                dimension="Financial Readiness",
+                missing_information="No unit economics or cost structure figures detected",
+                why_it_matters="Investors require validated customer acquisition costs and margin assumptions",
+                suggested_question="What are your estimated direct costs per user/unit delivered?",
+                suggested_evidence="Unit economics breakdown spreadsheet",
+            )
+        )
+
+    summary = f"Extracted {len(claims)} candidate evidence claims and {len(gaps)} potential validation gaps from '{source_filename}' using local pattern analysis."
+
+    return DocumentAnalysisResult(
+        source_filename=source_filename,
+        claims=claims,
+        missing_evidence_gaps=gaps,
+        document_summary=summary,
+        provider_used="heuristic",
+    )

@@ -15,8 +15,9 @@ from recommendations import generate_recommendations
 from report_generator import generate_report, report_filename
 from ai_service import (
     EXTRACTION_SECTIONS, STATUS_APPROVED, STATUS_EDITED, STATUS_PENDING, STATUS_REJECTED,
-    analyze_startup_idea,
+    analyze_startup_idea, analyze_extracted_document, DocumentAnalysisResult, DocumentEvidenceClaim,
 )
+from document_extractor import extract_document_text, ExtractionResult
 from business_plan_generator import (
     BUSINESS_PLAN_SECTIONS, create_business_plan_docx, draft_business_plan_content,
 )
@@ -502,7 +503,122 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
     """Render the local evidence inbox without changing assessment scores."""
     st.markdown("## Evidence Inbox / Registry")
     st.caption("Evidence records are separate from assessment ratings and classifications. Verification labels reflect submitted review state, not independent confirmation.")
-    with st.expander("Add evidence", expanded=False):
+
+    # -------------------------------------------------------------
+    # Document Text Extraction & AI Evidence Analysis Expander
+    # -------------------------------------------------------------
+    with st.expander("📄 Document Text Extraction & AI Evidence Analysis", expanded=False):
+        st.markdown("#### Upload Supporting Document")
+        st.caption("Upload a validation document (PDF, DOCX, TXT, CSV, or XLSX up to 10MB). Text is extracted securely and candidate evidence claims are surfaced for your manual review.")
+
+        doc_upload = st.file_uploader(
+            "Select supporting document",
+            type=["pdf", "docx", "txt", "csv", "xlsx"],
+            key="doc_extractor_file_upload"
+        )
+
+        if doc_upload is not None:
+            c_meta1, c_meta2, c_meta3 = st.columns(3)
+            c_meta1.caption(f"**Filename:** {doc_upload.name}")
+            c_meta2.caption(f"**Size:** {len(doc_upload.getvalue()) // 1024} KB")
+            c_meta3.caption(f"**Format:** {Path(doc_upload.name).suffix.upper()}")
+
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                extract_btn = st.button("Extract Document Text", type="secondary", key="btn_extract_doc_text")
+            with col_btn2:
+                analyze_doc_btn = st.button("Extract & Run AI Analysis", type="primary", key="btn_analyze_doc_text")
+
+            # Session storage for extracted text and findings
+            if f"ext_text_{doc_upload.name}" not in st.session_state:
+                st.session_state[f"ext_text_{doc_upload.name}"] = None
+            if f"doc_analysis_{doc_upload.name}" not in st.session_state:
+                st.session_state[f"doc_analysis_{doc_upload.name}"] = None
+
+            if extract_btn or analyze_doc_btn:
+                with st.spinner("Extracting text and structured data from document..."):
+                    ext_res: ExtractionResult = extract_document_text(doc_upload.getvalue(), doc_upload.name)
+                    st.session_state[f"ext_text_{doc_upload.name}"] = ext_res
+
+                    if not ext_res.success:
+                        st.error(ext_res.error)
+                    elif ext_res.is_scanned_or_empty:
+                        st.warning(ext_res.error or "Document contains no extractable text.")
+                    else:
+                        st.success(f"Extracted {ext_res.char_count} characters ({ext_res.file_type.upper()}).")
+
+                    if analyze_doc_btn and ext_res.success and ext_res.text:
+                        with st.spinner("Analyzing document for startup evidence claims and validation gaps..."):
+                            analysis_doc_res: DocumentAnalysisResult = analyze_extracted_document(
+                                ext_res.text,
+                                doc_upload.name,
+                                startup_profile=profile
+                            )
+                            st.session_state[f"doc_analysis_{doc_upload.name}"] = analysis_doc_res
+
+            cur_ext: ExtractionResult | None = st.session_state.get(f"ext_text_{doc_upload.name}")
+            if cur_ext and cur_ext.text:
+                with st.expander("Preview Extracted Text", expanded=False):
+                    st.text_area("Extracted Content", value=cur_ext.text, height=200, key=f"preview_text_{doc_upload.name}", disabled=True)
+
+            cur_analysis: DocumentAnalysisResult | None = st.session_state.get(f"doc_analysis_{doc_upload.name}")
+            if cur_analysis:
+                st.markdown("---")
+                st.markdown(f"### 📋 Candidate Evidence Findings ({len(cur_analysis.claims)} found)")
+                st.caption(f"Engine: `{cur_analysis.provider_used}` | {cur_analysis.document_summary}")
+                if cur_analysis.error:
+                    st.info(cur_analysis.error)
+
+                for c_idx, claim in enumerate(cur_analysis.claims):
+                    with st.container():
+                        st.markdown(f"**Claim {c_idx + 1}: {claim.claim_title}** (`{claim.evidence_type}` → *{claim.related_dimension}*)")
+                        st.write(claim.claim_description)
+                        if claim.supporting_excerpt:
+                            st.caption(f"**Supporting Excerpt:** \"{claim.supporting_excerpt}\"")
+                        st.caption(f"Confidence: `{claim.confidence}` | Directly Stated: `{claim.is_directly_stated}` | Action: {claim.recommended_verification}")
+
+                        col_act1, col_act2 = st.columns([2, 5])
+                        with col_act1:
+                            if claim.approval_status != STATUS_APPROVED:
+                                if st.button(f"Approve & Register Claim #{c_idx + 1}", key=f"app_doc_claim_{c_idx}"):
+                                    # Save to evidence registry safely
+                                    # Also store the uploaded attachment if not yet stored
+                                    att_info = {}
+                                    try:
+                                        stored, orig, sz = store_attachment(doc_upload.name, doc_upload.getvalue())
+                                        att_info = {"attachment_path": stored, "attachment_original_name": orig, "attachment_size": sz}
+                                    except Exception:
+                                        pass
+
+                                    save_evidence(profile, {
+                                        "evidence_title": claim.claim_title,
+                                        "evidence_description": f"{claim.claim_description}\n\n[Excerpt]: \"{claim.supporting_excerpt}\"",
+                                        "evidence_type": claim.evidence_type,
+                                        "related_dimension": claim.related_dimension,
+                                        "source_name": doc_upload.name,
+                                        "source_url": "",
+                                        "source_date": date.today().isoformat(),
+                                        "verification_status": "Founder submitted",
+                                        "founder_notes": f"Extracted via {cur_analysis.provider_used} document analysis. {claim.recommended_verification}.",
+                                        **att_info,
+                                    }, workspace_id=workspace_id, user_id=user_id)
+                                    claim.approval_status = STATUS_APPROVED
+                                    st.success(f"Registered claim #{c_idx + 1} into Evidence Registry!")
+                                    st.rerun()
+                            else:
+                                st.caption("✅ Approved & Registered")
+
+                if cur_analysis.missing_evidence_gaps:
+                    st.markdown("---")
+                    st.markdown("#### ⚠️ Document Validation Gaps")
+                    for gap in cur_analysis.missing_evidence_gaps:
+                        with st.expander(f"{gap.dimension} — {gap.missing_information}"):
+                            st.write(f"**Why it matters:** {gap.why_it_matters}")
+                            st.write(f"**Follow-up Question:** {gap.suggested_question}")
+                            st.write(f"**Suggested Evidence:** {gap.suggested_evidence}")
+
+    st.markdown("---")
+    with st.expander("Add manual evidence", expanded=False):
         with st.form("evidence_form"):
             title = st.text_input("Evidence title *")
             description = st.text_area("Evidence claim or description *")
