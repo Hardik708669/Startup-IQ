@@ -36,9 +36,12 @@ from database import (DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR, EVIDENCE_TYPES, VE
                        update_evidence, create_user, get_user_by_email, get_user_by_id,
                        update_user_last_login, create_workspace, list_user_workspaces,
                        get_workspace, update_workspace, archive_workspace, bootstrap_legacy_ownership,
-                       publish_generated_document)
+                       publish_generated_document, reset_login_failures,
+                       reserve_login_attempt, finalize_login_attempt)
 from auth_service import (hash_password, verify_password, validate_password_strength,
-                          validate_email, create_session_token, verify_session_token)
+                          validate_email, create_session_token, verify_session_token,
+                          revoke_session_token, normalize_login_identifier, security_event,
+                          get_login_rate_limit_config)
 
 st.set_page_config(page_title="Startup IQ | Startup Intake", page_icon="📊", layout="wide")
 
@@ -75,6 +78,16 @@ if "_auth_tab" not in st.session_state:
 
 def _do_logout() -> None:
     """Clear all auth and workspace session state and rerun."""
+    token = st.session_state.get("auth_token")
+    if token:
+        try:
+            revoked = revoke_session_token(token)
+            security_event("logout", outcome="success" if revoked else "failure", user_id=st.session_state.get("current_user_id"), reason=None if revoked else "session_not_revoked")
+            if not revoked:
+                st.warning("Your local session was cleared, but server-side revocation could not be confirmed.")
+        except RuntimeError:
+            security_event("logout", outcome="failure", user_id=st.session_state.get("current_user_id"), reason="revocation_unavailable")
+            st.warning("Your local session was cleared, but server-side revocation is temporarily unavailable.")
     for key in ["auth_token", "current_user_id", "current_user_email", "current_user_name",
                 "active_workspace_id", "active_workspace_name", "startup_profile",
                 "assessment_entries", "assessment_result", "recommendations",
@@ -114,15 +127,27 @@ def _render_auth_wall() -> None:
             pw_in = st.text_input("Password", type="password", key="login_pw")
             login_btn = st.form_submit_button("Log in", type="primary", width="stretch")
         if login_btn:
-            if not email_in.strip() or not pw_in:
-                st.error("Please enter your email and password.")
+            identifier = normalize_login_identifier(email_in)
+            rate_config = get_login_rate_limit_config()
+            allowed, _, reservation_id = reserve_login_attempt(identifier, **rate_config)
+            if not allowed:
+                security_event("login_rate_limit", outcome="blocked", reason="temporary_cooldown")
+                st.error("Invalid email or password.")
             else:
-                user_row = get_user_by_email(email_in.strip())
-                if user_row is None or not verify_password(pw_in, user_row["password_hash"]):
+                user_row = get_user_by_email(identifier) if identifier else None
+                verification_error = None
+                try:
+                    valid = bool(user_row and verify_password(pw_in, user_row["password_hash"]))
+                except Exception:
+                    valid = False
+                    verification_error = "password_verification_error"
+                if reservation_id:
+                    finalize_login_attempt(reservation_id, success=bool(valid and user_row and user_row.get("account_status") == "active"), **rate_config)
+                if not valid or user_row.get("account_status") != "active":
+                    security_event("login_failure", outcome="failure", user_id=user_row.get("user_id") if user_row else None, reason=verification_error or "invalid_credentials")
                     st.error("Invalid email or password.")
-                elif user_row.get("account_status") != "active":
-                    st.error("This account has been deactivated. Contact support.")
                 else:
+                    reset_login_failures(identifier)
                     token = create_session_token(user_row["user_id"], user_row["email"])
                     st.session_state.auth_token = token
                     st.session_state.current_user_id = user_row["user_id"]

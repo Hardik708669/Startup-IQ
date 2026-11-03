@@ -163,6 +163,20 @@ For production, set a strong `AUTH_JWT_SECRET`; do not use the development
 fallback. AI provider keys are optional because the local heuristic fallback is
 available.
 
+Authentication sessions are stored in SQLite by opaque JWT `jti` metadata; raw
+tokens are never stored. Logout revokes only the current session, while expired
+session records can be safely cleaned up. Tokens without a registered session
+identifier are rejected, so users must log in again after this session migration.
+Login identifiers are normalized and protected by a persistent default limit of
+five failures in fifteen minutes followed by a temporary fifteen-minute cooldown.
+Successful login resets the counter. Security events such as login success,
+failure, rate limiting, logout, revocation, and token verification failures are
+emitted through Python logging with safe event fields only. Deployments should
+route these logs to protected collection and retention infrastructure; passwords,
+tokens, secrets, and document contents are never logged.
+The defaults can be configured with `AUTH_LOGIN_MAX_ATTEMPTS`,
+`AUTH_LOGIN_WINDOW_SECONDS`, and `AUTH_LOGIN_COOLDOWN_SECONDS`.
+
 Run the application:
 
 ```powershell

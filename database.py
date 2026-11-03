@@ -6,7 +6,7 @@ Extended with User Accounts, Workspaces, and Object-Level Ownership.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 import json
 import logging
@@ -147,6 +147,29 @@ CREATE TABLE IF NOT EXISTS generated_documents (
     sections_json TEXT,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    jti TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS login_attempts (
+    identifier TEXT PRIMARY KEY,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    first_failed_at TEXT,
+    locked_until TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS login_attempt_reservations (
+    reservation_id TEXT PRIMARY KEY,
+    identifier TEXT NOT NULL,
+    reserved_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
 """
 
 SCHEMA_INDEXES = """
@@ -159,6 +182,9 @@ CREATE INDEX IF NOT EXISTS idx_evidence_startup ON evidence_records(startup_id, 
 CREATE INDEX IF NOT EXISTS idx_evidence_workspace ON evidence_records(workspace_id, archived_at);
 CREATE INDEX IF NOT EXISTS idx_docs_assessment ON generated_documents(assessment_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_docs_workspace ON generated_documents(workspace_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_lock ON login_attempts(locked_until);
+CREATE INDEX IF NOT EXISTS idx_login_reservations_identifier ON login_attempt_reservations(identifier, expires_at);
 """
 
 SCHEMA = SCHEMA_TABLES + SCHEMA_INDEXES
@@ -276,6 +302,165 @@ def get_user_by_id(user_id: int, path: str | Path = DEFAULT_DB_PATH) -> dict[str
     with get_connection(path) as connection:
         row = connection.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Authentication sessions and persistent login throttling
+# ---------------------------------------------------------------------------
+
+def create_auth_session(jti: str, user_id: int, issued_at: str, expires_at: str, path: str | Path = DEFAULT_DB_PATH) -> None:
+    initialize_database(path)
+    with get_connection(path) as connection:
+        connection.execute(
+            "INSERT INTO auth_sessions (jti, user_id, issued_at, expires_at) VALUES (?, ?, ?, ?)",
+            (jti, user_id, issued_at, expires_at),
+        )
+
+
+def get_auth_session(jti: str, path: str | Path = DEFAULT_DB_PATH) -> dict[str, Any] | None:
+    initialize_database(path)
+    with get_connection(path) as connection:
+        row = connection.execute("SELECT * FROM auth_sessions WHERE jti = ?", (jti,)).fetchone()
+    return dict(row) if row else None
+
+
+def revoke_auth_session(jti: str, user_id: int, path: str | Path = DEFAULT_DB_PATH) -> bool:
+    initialize_database(path)
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection(path) as connection:
+        cursor = connection.execute("UPDATE auth_sessions SET revoked_at = ? WHERE jti = ? AND user_id = ? AND revoked_at IS NULL", (now, jti, user_id))
+        return cursor.rowcount == 1
+
+
+def revoke_all_auth_sessions(user_id: int, path: str | Path = DEFAULT_DB_PATH) -> None:
+    initialize_database(path)
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection(path) as connection:
+        connection.execute("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL", (now, user_id))
+
+
+def cleanup_expired_auth_sessions(path: str | Path = DEFAULT_DB_PATH) -> int:
+    initialize_database(path)
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection(path) as connection:
+        cursor = connection.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now,))
+        return cursor.rowcount
+
+
+def login_rate_limit_status(identifier: str, *, max_attempts: int = 5, window_seconds: int = 900, cooldown_seconds: int = 900, path: str | Path = DEFAULT_DB_PATH, now: datetime | None = None) -> tuple[bool, int]:
+    """Atomically check whether an identifier is temporarily rate limited."""
+    identifier = str(identifier or "").strip().lower()
+    initialize_database(path)
+    current = now or datetime.now(timezone.utc)
+    current_iso = current.isoformat()
+    with get_connection(path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT failed_count, first_failed_at, locked_until FROM login_attempts WHERE identifier = ?", (identifier,)).fetchone()
+        if not row:
+            return False, 0
+        locked_until = datetime.fromisoformat(row["locked_until"]) if row["locked_until"] else None
+        first_failed = datetime.fromisoformat(row["first_failed_at"]) if row["first_failed_at"] else None
+        if locked_until and locked_until > current:
+            return True, max(0, int((locked_until - current).total_seconds()))
+        if first_failed and (current - first_failed).total_seconds() >= window_seconds:
+            connection.execute("DELETE FROM login_attempts WHERE identifier = ?", (identifier,))
+            return False, 0
+        return int(row["failed_count"]) >= max_attempts, 0
+
+
+def reserve_login_attempt(identifier: str, *, max_attempts: int = 5, window_seconds: int = 900, cooldown_seconds: int = 900, reservation_ttl_seconds: int = 300, path: str | Path = DEFAULT_DB_PATH, now: datetime | None = None) -> tuple[bool, int, str | None]:
+    """Atomically reserve one password-verification attempt for an identifier."""
+    identifier = str(identifier or "").strip().lower()
+    initialize_database(path)
+    current = now or datetime.now(timezone.utc)
+    with get_connection(path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM login_attempt_reservations WHERE expires_at <= ?", (current.isoformat(),))
+        row = connection.execute("SELECT failed_count, first_failed_at, locked_until FROM login_attempts WHERE identifier = ?", (identifier,)).fetchone()
+        if row:
+            locked_until = datetime.fromisoformat(row["locked_until"]) if row["locked_until"] else None
+            first_failed = datetime.fromisoformat(row["first_failed_at"]) if row["first_failed_at"] else None
+            if locked_until and locked_until > current:
+                return False, max(0, int((locked_until - current).total_seconds())), None
+            if first_failed and (current - first_failed).total_seconds() >= window_seconds:
+                row = None
+        count = int(row["failed_count"]) if row else 0
+        pending_count = connection.execute("SELECT COUNT(*) AS count FROM login_attempt_reservations WHERE identifier = ?", (identifier,)).fetchone()["count"]
+        count += int(pending_count)
+        if count >= max_attempts:
+            locked_until = current + timedelta(seconds=cooldown_seconds)
+            connection.execute("UPDATE login_attempts SET locked_until = ?, updated_at = ? WHERE identifier = ?", (locked_until.isoformat(), current.isoformat(), identifier))
+            return False, cooldown_seconds, None
+        first = row["first_failed_at"] if row and row["first_failed_at"] else current.isoformat()
+        reservation_id = str(uuid.uuid4())
+        connection.execute(
+            "INSERT INTO login_attempt_reservations(reservation_id, identifier, reserved_at, expires_at) VALUES (?, ?, ?, ?)",
+            (reservation_id, identifier, current.isoformat(), (current + timedelta(seconds=reservation_ttl_seconds)).isoformat()),
+        )
+        return True, 0, reservation_id
+
+
+def finalize_login_attempt(reservation_id: str, *, success: bool, max_attempts: int = 5, window_seconds: int = 900, cooldown_seconds: int = 900, path: str | Path = DEFAULT_DB_PATH, now: datetime | None = None) -> bool:
+    """Consume one pending reservation exactly once and record its result."""
+    current = now or datetime.now(timezone.utc)
+    initialize_database(path)
+    with get_connection(path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        reservation = connection.execute("SELECT identifier FROM login_attempt_reservations WHERE reservation_id = ?", (reservation_id,)).fetchone()
+        if not reservation:
+            return False
+        connection.execute("DELETE FROM login_attempt_reservations WHERE reservation_id = ?", (reservation_id,))
+        if success:
+            connection.execute("DELETE FROM login_attempts WHERE identifier = ?", (reservation["identifier"],))
+            return True
+        row = connection.execute("SELECT failed_count, first_failed_at FROM login_attempts WHERE identifier = ?", (reservation["identifier"],)).fetchone()
+        first = datetime.fromisoformat(row["first_failed_at"]) if row and row["first_failed_at"] else current
+        count = int(row["failed_count"]) if row and (current - first).total_seconds() < window_seconds else 0
+        count += 1
+        locked_until = current + timedelta(seconds=cooldown_seconds) if count >= max_attempts else None
+        connection.execute(
+            "INSERT INTO login_attempts(identifier, failed_count, first_failed_at, locked_until, updated_at) VALUES (?, ?, ?, NULL, ?) "
+            "ON CONFLICT(identifier) DO UPDATE SET failed_count=excluded.failed_count, first_failed_at=excluded.first_failed_at, locked_until=NULL, updated_at=excluded.updated_at",
+            (reservation["identifier"], count, first.isoformat(), current.isoformat()),
+        )
+        if locked_until:
+            connection.execute("UPDATE login_attempts SET locked_until = ? WHERE identifier = ?", (locked_until.isoformat(), reservation["identifier"]))
+        return True
+
+
+def cleanup_expired_login_reservations(path: str | Path = DEFAULT_DB_PATH, now: datetime | None = None) -> int:
+    initialize_database(path)
+    current = (now or datetime.now(timezone.utc)).isoformat()
+    with get_connection(path) as connection:
+        cursor = connection.execute("DELETE FROM login_attempt_reservations WHERE expires_at <= ?", (current,))
+        return cursor.rowcount
+
+
+def record_login_failure(identifier: str, *, max_attempts: int = 5, window_seconds: int = 900, cooldown_seconds: int = 900, path: str | Path = DEFAULT_DB_PATH, now: datetime | None = None) -> bool:
+    identifier = str(identifier or "").strip().lower()
+    initialize_database(path)
+    current = now or datetime.now(timezone.utc)
+    current_iso = current.isoformat()
+    with get_connection(path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT failed_count, first_failed_at FROM login_attempts WHERE identifier = ?", (identifier,)).fetchone()
+        first = datetime.fromisoformat(row["first_failed_at"]) if row and row["first_failed_at"] else current
+        count = int(row["failed_count"]) if row and (current - first).total_seconds() < window_seconds else 0
+        count += 1
+        locked_until = current + timedelta(seconds=cooldown_seconds) if count >= max_attempts else None
+        connection.execute(
+            "INSERT INTO login_attempts(identifier, failed_count, first_failed_at, locked_until, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(identifier) DO UPDATE SET failed_count=excluded.failed_count, first_failed_at=excluded.first_failed_at, locked_until=excluded.locked_until, updated_at=excluded.updated_at",
+            (identifier, count, first.isoformat(), locked_until.isoformat() if locked_until else None, current_iso),
+        )
+        return locked_until is not None
+
+
+def reset_login_failures(identifier: str, path: str | Path = DEFAULT_DB_PATH) -> None:
+    identifier = str(identifier or "").strip().lower()
+    initialize_database(path)
+    with get_connection(path) as connection:
+        connection.execute("DELETE FROM login_attempts WHERE identifier = ?", (identifier,))
 
 
 def update_user_last_login(user_id: int, path: str | Path = DEFAULT_DB_PATH) -> None:
