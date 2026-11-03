@@ -307,7 +307,7 @@ def validate_backup(backup_path: str | Path) -> dict[str, Any]:
         raise ValueError("Backup root cannot be a symlink or reparse point.")
     root = raw_root.resolve()
     manifest_path = root / MANIFEST_NAME
-    if not root.is_dir() or not manifest_path.is_file():
+    if not root.is_dir() or _is_reparse_point(manifest_path) or not manifest_path.is_file():
         raise ValueError("Backup is incomplete or has no manifest.")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -411,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
             path = restore_backup(args.backup, args.target)
             print(f"Backup restored and validated in staging: {path}")
         return 0
-    except (OSError, ValueError, sqlite3.Error, json.JSONDecodeError) as error:
+    except (OSError, ValueError, RuntimeError, sqlite3.Error, json.JSONDecodeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
 

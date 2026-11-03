@@ -8,7 +8,7 @@ import subprocess
 import pytest
 import backup_recovery
 
-from backup_recovery import create_backup, restore_backup, validate_backup
+from backup_recovery import create_backup, main, restore_backup, validate_backup
 from database import (
     create_user, create_workspace, initialize_database, save_evidence,
     save_assessment, save_generated_document, store_attachment,
@@ -228,16 +228,46 @@ def test_restore_competing_destination_is_not_replaced(tmp_path, monkeypatch):
     requested = tmp_path / "race" / "restore"
     competing = requested
 
+    original_rename = os.rename
+
     def race(staging, destination):
         competing.parent.mkdir(parents=True, exist_ok=True)
         competing.mkdir()
         (competing / "owner.txt").write_text("competing")
-        return backup_recovery._finalize_no_clobber.__wrapped__(staging, destination) if hasattr(backup_recovery._finalize_no_clobber, "__wrapped__") else (_ for _ in ()).throw(FileExistsError("competing destination"))
+        return original_rename(staging, destination)
 
-    monkeypatch.setattr(backup_recovery, "_finalize_no_clobber", race)
+    monkeypatch.setattr(backup_recovery.os, "rename", race)
     with pytest.raises(FileExistsError):
         backup_recovery.restore_backup(backup, requested)
     assert (competing / "owner.txt").read_text() == "competing"
+
+
+def test_manifest_symlink_is_rejected_before_external_contents_are_parsed(tmp_path):
+    db, attachments, documents, _ = _fixture_data(tmp_path)
+    backup = backup_recovery.create_backup(tmp_path / "backups", db_path=db, attachment_dir=attachments, documents_dir=documents, application_stopped=True)
+    external = tmp_path / "external-manifest.json"
+    external.write_text("not valid json")
+    manifest = backup / "manifest.json"
+    manifest.unlink()
+    try:
+        manifest.symlink_to(external)
+    except (OSError, NotImplementedError):
+        pytest.skip("Manifest symlink creation is unavailable on this platform")
+    with pytest.raises(ValueError, match="incomplete|unsafe|manifest"):
+        backup_recovery.validate_backup(backup)
+    assert external.read_text() == "not valid json"
+    manifest.unlink()
+
+
+def test_cli_returns_error_code_for_platform_finalization_limit(tmp_path, monkeypatch, capsys):
+    db, attachments, documents, _ = _fixture_data(tmp_path)
+    backup = backup_recovery.create_backup(tmp_path / "backups", db_path=db, attachment_dir=attachments, documents_dir=documents, application_stopped=True)
+    monkeypatch.setattr(backup_recovery, "_finalize_no_clobber", lambda staging, destination: (_ for _ in ()).throw(RuntimeError("platform limitation")))
+    result = main(["restore", "--backup", str(backup), "--target", str(tmp_path / "restore")])
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "ERROR: platform limitation" in captured.err
+    assert "Traceback" not in captured.err
 
 
 @pytest.mark.parametrize(
