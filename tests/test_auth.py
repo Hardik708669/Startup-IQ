@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 import sqlite3
 import os
+import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from database import (
     save_assessment, list_assessments, get_assessment, save_generated_document,
     list_generated_documents, get_generated_document
 )
-from database import login_rate_limit_status, record_login_failure, reset_login_failures, get_auth_session
+from database import login_rate_limit_status, record_login_failure, reset_login_failures, get_auth_session, reserve_login_attempt
 from scoring import AssessmentResult, DimensionScore
 from recommendations import Recommendation
 
@@ -122,6 +123,45 @@ def test_tokens_without_jti_are_rejected(monkeypatch, temp_db: Path):
     payload = {"user_id": 1, "email": "old@test.com", "iat": 1, "exp": int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp())}
     token = jwt.encode(payload, get_jwt_secret(), algorithm="HS256")
     assert verify_session_token(token, path=temp_db) is None
+
+
+def test_revocation_requires_valid_signature_and_session_owner(temp_db: Path):
+    import jwt
+    token = create_session_token(10, "owner@test.com", path=temp_db)
+    payload = jwt.decode(token, options={"verify_signature": False})
+    forged = jwt.encode(payload, "test-only-forged-token-key-32-bytes-min", algorithm="HS256")
+    modified = token[:-1] + ("a" if token[-1] != "a" else "b")
+    assert revoke_session_token(forged, path=temp_db) is False
+    assert revoke_session_token(modified, path=temp_db) is False
+    assert verify_session_token(token, path=temp_db) is not None
+    other = create_session_token(11, "other@test.com", path=temp_db)
+    assert revoke_session_token(other, path=temp_db) is True
+    assert verify_session_token(token, path=temp_db) is not None
+
+
+def test_expired_signed_token_can_be_revoked_and_mismatched_session_fails(temp_db: Path):
+    import sqlite3
+    import jwt
+    expired = create_session_token(20, "expired@test.com", expires_in_hours=-1, path=temp_db)
+    assert revoke_session_token(expired, path=temp_db) is True
+    assert verify_session_token(expired, path=temp_db) is None
+    valid = create_session_token(21, "owner@test.com", path=temp_db)
+    payload = jwt.decode(valid, options={"verify_signature": False})
+    with sqlite3.connect(temp_db) as connection:
+        connection.execute("UPDATE auth_sessions SET user_id = ? WHERE jti = ?", (999, payload["jti"]))
+    assert verify_session_token(valid, path=temp_db) is None
+
+
+def test_atomic_login_attempt_reservation_limits_concurrent_requests(temp_db: Path):
+    results = []
+    barrier = threading.Barrier(10)
+    def reserve():
+        barrier.wait()
+        results.append(reserve_login_attempt("concurrent@example.com", max_attempts=5, cooldown_seconds=60, path=temp_db)[0])
+    threads = [threading.Thread(target=reserve) for _ in range(10)]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join()
+    assert sum(results) == 5
 
 
 def test_persistent_login_rate_limit_normalizes_and_resets(temp_db: Path):

@@ -164,8 +164,13 @@ def verify_session_token(token: str, *, path: str | Path = DEFAULT_DB_PATH) -> d
             security_event("token_verification_failure", outcome="failure", reason="missing_session_id")
             return None
         session = get_auth_session(jti, path)
-        if not session or session.get("revoked_at"):
+        if (not session or session.get("jti") != jti or session.get("revoked_at")
+                or int(session.get("user_id", -1)) != int(payload.get("user_id", -2))):
             security_event("token_verification_failure", outcome="failure", jti=jti, reason="unknown_or_revoked_session")
+            return None
+        stored_exp = datetime.fromisoformat(str(session["expires_at"])).timestamp()
+        if abs(stored_exp - int(payload["exp"])) > 1 or stored_exp <= datetime.now(timezone.utc).timestamp():
+            security_event("token_verification_failure", outcome="failure", jti=jti, reason="session_expired_or_mismatched")
             return None
         security_event("token_verified", outcome="success", user_id=payload.get("user_id"), jti=jti)
         return payload
@@ -177,15 +182,33 @@ def verify_session_token(token: str, *, path: str | Path = DEFAULT_DB_PATH) -> d
         return None
 
 
-def revoke_session_token(token: str, *, path: str | Path = DEFAULT_DB_PATH) -> None:
+def revoke_session_token(token: str, *, path: str | Path = DEFAULT_DB_PATH) -> bool:
     try:
-        payload = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM], options={"verify_exp": False})
         jti = payload.get("jti")
-        if isinstance(jti, str):
-            revoke_auth_session(jti, path)
-            security_event("token_revocation", outcome="success", user_id=payload.get("user_id"), jti=jti)
-    except Exception:
+        user_id = payload.get("user_id")
+        if not isinstance(jti, str) or not jti or not isinstance(user_id, int):
+            security_event("token_revocation", outcome="failure", reason="malformed_session")
+            return False
+        session = get_auth_session(jti, path)
+        if not session or int(session.get("user_id", -1)) != user_id:
+            security_event("token_revocation", outcome="failure", jti=jti, reason="unknown_session")
+            return False
+        if revoke_auth_session(jti, user_id, path):
+            security_event("token_revocation", outcome="success", user_id=user_id, jti=jti)
+            return True
+        security_event("token_revocation", outcome="failure", user_id=user_id, jti=jti, reason="already_revoked")
+        return False
+    except jwt.InvalidTokenError:
         security_event("token_revocation", outcome="failure", reason="invalid_token")
+        return False
+    except (ValueError, TypeError, KeyError):
+        security_event("token_revocation", outcome="failure", reason="malformed_session")
+        return False
+    except Exception as error:
+        logger.error("Session revocation unavailable: %s", type(error).__name__)
+        security_event("token_revocation", outcome="failure", reason="storage_unavailable")
+        raise RuntimeError("Session revocation is temporarily unavailable.") from error
 
 
 def revoke_all_sessions(user_id: int, *, path: str | Path = DEFAULT_DB_PATH) -> None:

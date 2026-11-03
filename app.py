@@ -37,7 +37,7 @@ from database import (DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR, EVIDENCE_TYPES, VE
                        update_user_last_login, create_workspace, list_user_workspaces,
                        get_workspace, update_workspace, archive_workspace, bootstrap_legacy_ownership,
                        publish_generated_document, login_rate_limit_status, record_login_failure,
-                       reset_login_failures)
+                       reset_login_failures, reserve_login_attempt)
 from auth_service import (hash_password, verify_password, validate_password_strength,
                           validate_email, create_session_token, verify_session_token,
                           revoke_session_token, normalize_login_identifier, security_event,
@@ -80,8 +80,14 @@ def _do_logout() -> None:
     """Clear all auth and workspace session state and rerun."""
     token = st.session_state.get("auth_token")
     if token:
-        revoke_session_token(token)
-        security_event("logout", outcome="success", user_id=st.session_state.get("current_user_id"))
+        try:
+            revoked = revoke_session_token(token)
+            security_event("logout", outcome="success" if revoked else "failure", user_id=st.session_state.get("current_user_id"), reason=None if revoked else "session_not_revoked")
+            if not revoked:
+                st.warning("Your local session was cleared, but server-side revocation could not be confirmed.")
+        except RuntimeError:
+            security_event("logout", outcome="failure", user_id=st.session_state.get("current_user_id"), reason="revocation_unavailable")
+            st.warning("Your local session was cleared, but server-side revocation is temporarily unavailable.")
     for key in ["auth_token", "current_user_id", "current_user_email", "current_user_name",
                 "active_workspace_id", "active_workspace_name", "startup_profile",
                 "assessment_entries", "assessment_result", "recommendations",
@@ -123,8 +129,8 @@ def _render_auth_wall() -> None:
         if login_btn:
             identifier = normalize_login_identifier(email_in)
             rate_config = get_login_rate_limit_config()
-            limited, _ = login_rate_limit_status(identifier, **rate_config)
-            if limited:
+            allowed, _ = reserve_login_attempt(identifier, **rate_config)
+            if not allowed:
                 security_event("login_rate_limit", outcome="blocked", reason="temporary_cooldown")
                 st.error("Invalid email or password.")
             else:

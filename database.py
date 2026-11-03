@@ -316,11 +316,12 @@ def get_auth_session(jti: str, path: str | Path = DEFAULT_DB_PATH) -> dict[str, 
     return dict(row) if row else None
 
 
-def revoke_auth_session(jti: str, path: str | Path = DEFAULT_DB_PATH) -> None:
+def revoke_auth_session(jti: str, user_id: int, path: str | Path = DEFAULT_DB_PATH) -> bool:
     initialize_database(path)
     now = datetime.now(timezone.utc).isoformat()
     with get_connection(path) as connection:
-        connection.execute("UPDATE auth_sessions SET revoked_at = ? WHERE jti = ? AND revoked_at IS NULL", (now, jti))
+        cursor = connection.execute("UPDATE auth_sessions SET revoked_at = ? WHERE jti = ? AND user_id = ? AND revoked_at IS NULL", (now, jti, user_id))
+        return cursor.rowcount == 1
 
 
 def revoke_all_auth_sessions(user_id: int, path: str | Path = DEFAULT_DB_PATH) -> None:
@@ -357,6 +358,35 @@ def login_rate_limit_status(identifier: str, *, max_attempts: int = 5, window_se
             connection.execute("DELETE FROM login_attempts WHERE identifier = ?", (identifier,))
             return False, 0
         return int(row["failed_count"]) >= max_attempts, 0
+
+
+def reserve_login_attempt(identifier: str, *, max_attempts: int = 5, window_seconds: int = 900, cooldown_seconds: int = 900, path: str | Path = DEFAULT_DB_PATH, now: datetime | None = None) -> tuple[bool, int]:
+    """Atomically reserve one password-verification attempt for an identifier."""
+    identifier = str(identifier or "").strip().lower()
+    initialize_database(path)
+    current = now or datetime.now(timezone.utc)
+    with get_connection(path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT failed_count, first_failed_at, locked_until FROM login_attempts WHERE identifier = ?", (identifier,)).fetchone()
+        if row:
+            locked_until = datetime.fromisoformat(row["locked_until"]) if row["locked_until"] else None
+            first_failed = datetime.fromisoformat(row["first_failed_at"]) if row["first_failed_at"] else None
+            if locked_until and locked_until > current:
+                return False, max(0, int((locked_until - current).total_seconds()))
+            if first_failed and (current - first_failed).total_seconds() >= window_seconds:
+                row = None
+        count = int(row["failed_count"]) if row else 0
+        if count >= max_attempts:
+            locked_until = current + timedelta(seconds=cooldown_seconds)
+            connection.execute("UPDATE login_attempts SET locked_until = ?, updated_at = ? WHERE identifier = ?", (locked_until.isoformat(), current.isoformat(), identifier))
+            return False, cooldown_seconds
+        first = row["first_failed_at"] if row and row["first_failed_at"] else current.isoformat()
+        connection.execute(
+            "INSERT INTO login_attempts(identifier, failed_count, first_failed_at, locked_until, updated_at) VALUES (?, ?, ?, NULL, ?) "
+            "ON CONFLICT(identifier) DO UPDATE SET failed_count=excluded.failed_count, first_failed_at=excluded.first_failed_at, locked_until=NULL, updated_at=excluded.updated_at",
+            (identifier, count + 1, first, current.isoformat()),
+        )
+        return True, 0
 
 
 def record_login_failure(identifier: str, *, max_attempts: int = 5, window_seconds: int = 900, cooldown_seconds: int = 900, path: str | Path = DEFAULT_DB_PATH, now: datetime | None = None) -> bool:
