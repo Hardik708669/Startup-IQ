@@ -1,7 +1,9 @@
 """Isolated backup and staging-restore coverage."""
 
 import json
+import os
 from pathlib import Path
+import subprocess
 
 import pytest
 import backup_recovery
@@ -13,6 +15,22 @@ from database import (
 )
 from recommendations import generate_recommendations
 from scoring import DIMENSIONS, calculate_assessment
+
+
+def _make_junction(link: Path, target: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows junctions are only available on Windows")
+    result = subprocess.run(
+        ["cmd.exe", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"Windows junction creation unavailable: {result.stderr or result.stdout}")
+
+
+def _remove_junction(link: Path) -> None:
+    if link.exists() or link.is_symlink():
+        link.rmdir()
 
 
 def _fixture_data(tmp_path: Path):
@@ -257,3 +275,68 @@ def test_restore_finalization_failure_cleans_only_owned_staging(tmp_path, monkey
         backup_recovery.restore_backup(backup, requested)
     assert not requested.exists()
     assert not list(requested.parent.glob(f".{requested.name}.restore-*"))
+
+
+def test_junction_in_attachments_is_rejected_without_reading_target(tmp_path):
+    db, attachments, documents, _ = _fixture_data(tmp_path)
+    outside = tmp_path / "outside-attachments"
+    outside.mkdir()
+    (outside / "private.txt").write_text("must not be copied")
+    junction = attachments / "external-directory"
+    _make_junction(junction, outside)
+    try:
+        with pytest.raises(ValueError, match="Unsafe"):
+            backup_recovery.create_backup(tmp_path / "backups", db_path=db, attachment_dir=attachments, documents_dir=documents, application_stopped=True)
+        assert (outside / "private.txt").read_text() == "must not be copied"
+        assert not list((tmp_path / "backups").glob("startup-iq-backup-*"))
+    finally:
+        _remove_junction(junction)
+
+
+def test_junction_in_documents_is_rejected_without_reading_target(tmp_path):
+    db, attachments, documents, _ = _fixture_data(tmp_path)
+    outside = tmp_path / "outside-documents"
+    outside.mkdir()
+    (outside / "private.docx").write_bytes(b"must not be copied")
+    junction = documents / "external-directory"
+    _make_junction(junction, outside)
+    try:
+        with pytest.raises(ValueError, match="Unsafe"):
+            backup_recovery.create_backup(tmp_path / "backups", db_path=db, attachment_dir=attachments, documents_dir=documents, application_stopped=True)
+        assert (outside / "private.docx").read_bytes() == b"must not be copied"
+    finally:
+        _remove_junction(junction)
+
+
+def test_junction_restore_parent_is_rejected_before_external_child_creation(tmp_path):
+    db, attachments, documents, _ = _fixture_data(tmp_path)
+    backup = backup_recovery.create_backup(tmp_path / "backups", db_path=db, attachment_dir=attachments, documents_dir=documents, application_stopped=True)
+    trusted = tmp_path / "trusted-junction"
+    trusted.mkdir()
+    outside = tmp_path / "external-restore-target"
+    outside.mkdir()
+    junction = trusted / "external"
+    _make_junction(junction, outside)
+    try:
+        with pytest.raises(ValueError, match="unsafe"):
+            backup_recovery.restore_backup(backup, junction / "missing" / "restored")
+        assert not (outside / "missing").exists()
+        assert not list(trusted.glob("*.restore-*"))
+    finally:
+        _remove_junction(junction)
+
+
+def test_junction_inside_backup_is_rejected_by_verification(tmp_path):
+    db, attachments, documents, _ = _fixture_data(tmp_path)
+    backup = backup_recovery.create_backup(tmp_path / "backups", db_path=db, attachment_dir=attachments, documents_dir=documents, application_stopped=True)
+    outside = tmp_path / "outside-backup"
+    outside.mkdir()
+    (outside / "untrusted.txt").write_text("untrusted")
+    junction = backup / "data" / "attachments" / "external-directory"
+    _make_junction(junction, outside)
+    try:
+        with pytest.raises(ValueError, match="Unsafe"):
+            backup_recovery.validate_backup(backup)
+        assert (outside / "untrusted.txt").read_text() == "untrusted"
+    finally:
+        _remove_junction(junction)
