@@ -175,6 +175,61 @@ After submitting a startup profile, use **Evidence Inbox / Registry** to registe
 
 Copy `.env.example` to `.env` only when optional future AI configuration is needed. No credentials are required for the current app.
 
+## Backup and recovery
+
+Startup IQ stores its SQLite database in `data/startup_iq.db`, uploaded attachments
+in `data/attachments/`, and generated DOCX/PPTX files in `data/documents/`.
+Backups contain sensitive founder, startup, evidence, and generated-document data;
+store them encrypted and restrict access appropriately. Do not place a backup inside
+the project's `data/` directory or commit one to Git.
+
+Stop Streamlit before creating a backup so the database and file storage represent
+the same offline maintenance point. From the repository root, use a destination
+outside the project data directory:
+
+Replace `BACKUP_ID` with the directory name printed by the backup command:
+
+```powershell
+python backup_recovery.py backup --destination C:\Startup-IQ-Backups --offline
+python backup_recovery.py verify --backup C:\Startup-IQ-Backups\BACKUP_DIRECTORY
+python backup_recovery.py restore --backup C:\Startup-IQ-Backups\BACKUP_DIRECTORY --target C:\Startup-IQ-Recovery\staging
+```
+
+The utility uses SQLite's backup API, records SHA-256 checksums and file sizes,
+independently compares the expected attachment/document inventory with the copied
+inventory before generating the manifest, validates SQLite integrity and foreign
+keys, and atomically finalizes completed backup directories on the same filesystem
+as the destination. This is not a live
+application snapshot: `--offline` is an operator confirmation, not automatic
+process detection. Symlinks, junctions, and Windows reparse points are rejected.
+Restore inspects existing parent components before creating missing directories,
+rejects symlinked or reparse-point parents and existing targets, stages into a
+temporary directory, validates it, and never replaces active application data or
+activates a recovered dataset.
+An operator must inspect restored records and generated-document references before
+deliberately activating any recovered dataset through a separate procedure.
+
+The unsigned manifest's SHA-256 checksums detect accidental corruption when the
+manifest is trusted; they do not authenticate a backup against an attacker who can
+modify both files and the manifest. Use a separately protected signature or
+checksum for authenticity. The CLI currently uses the configured default paths
+from `database.py` and does not expose custom storage-path options. Legacy migration
+backup files are not part of the active backup unless explicitly included by a
+future implementation.
+
+Finalization uses a same-filesystem rename and Windows no-replace behavior where
+available. No universal race-free no-clobber guarantee is claimed for every
+operating system or filesystem; an operator should treat the destination directory
+as exclusively owned during recovery. The `--offline` flag is operator confirmation
+that Streamlit has genuinely been stopped, not automatic process detection.
+
+Historical evidence snapshots are stored in SQLite. Assessment HTML reports are
+generated for download rather than persisted as a report directory; persisted
+generated documents under `data/documents/` are included. The current design is
+offline and single-instance: it does not provide an atomic live backup while
+Streamlit is writing. A daily backup plus an additional backup before major data
+changes is recommended, with periodic restore drills to an isolated staging area.
+
 ## User Authentication, Workspace Management & Multi-User Data Security (Phase 6)
 
 Startup IQ features account management, workspace isolation, and object-level data security:
