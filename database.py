@@ -9,12 +9,17 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
+import os
 from pathlib import Path
 import shutil
 import sqlite3
+import tempfile
 import uuid
 from datetime import date
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from recommendations import Recommendation
 from scoring import AssessmentResult, DimensionScore
@@ -844,27 +849,37 @@ def save_generated_document(
     workspace_id: int | None = None,
     user_id: int | None = None,
     path: str | Path = DEFAULT_DB_PATH,
+    document_id: str | None = None,
 ) -> str:
     """Record a generated document linked to startup, assessment, workspace, and owner user."""
     initialize_database(path)
-    doc_id = str(uuid.uuid4())
+    doc_id = document_id or str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     with get_connection(path) as connection:
+        assessment = connection.execute("SELECT id, startup_id, workspace_id, user_id FROM assessments WHERE id = ?", (assessment_id,)).fetchone()
+        startup = connection.execute("SELECT id, workspace_id, user_id FROM startups WHERE id = ?", (startup_id,)).fetchone()
+        if not assessment or not startup:
+            raise ValueError("Generated document references a missing assessment or startup.")
+        if workspace_id is None or user_id is None:
+            raise ValueError("user_id and workspace_id are required for generated-document registration.")
+        user = connection.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        workspace = connection.execute("SELECT workspace_id, owner_user_id FROM workspaces WHERE workspace_id = ?", (workspace_id,)).fetchone()
+        if not user or not workspace or workspace["owner_user_id"] != user_id:
+            raise PermissionError("User is not authorized for the generated document workspace.")
+        legacy_unowned = assessment["workspace_id"] is None and assessment["user_id"] is None and startup["workspace_id"] is None and startup["user_id"] is None
+        if assessment["startup_id"] != startup_id or assessment["workspace_id"] != workspace_id or startup["workspace_id"] != workspace_id:
+            raise ValueError("Generated document ownership relationships do not match.")
+        if assessment["user_id"] not in (None, user_id) or startup["user_id"] not in (None, user_id):
+            raise PermissionError("Generated document owner does not match the assessment or startup owner.")
+        duplicate = connection.execute("SELECT 1 FROM generated_documents WHERE document_id = ?", (doc_id,)).fetchone()
+        if duplicate:
+            raise ValueError("Generated document ID already exists.")
         # Determine next document version
         row = connection.execute(
             "SELECT MAX(document_version) as max_v FROM generated_documents WHERE assessment_id = ? AND document_type = ?",
             (assessment_id, document_type)
         ).fetchone()
         next_version = (row["max_v"] or 0) + 1 if row else 1
-
-        # If workspace_id/user_id not provided, inherit from assessment
-        if workspace_id is None or user_id is None:
-            ass = connection.execute("SELECT workspace_id, user_id FROM assessments WHERE id = ?", (assessment_id,)).fetchone()
-            if ass:
-                if workspace_id is None:
-                    workspace_id = ass["workspace_id"]
-                if user_id is None:
-                    user_id = ass["user_id"]
 
         connection.execute(
             """INSERT INTO generated_documents
@@ -876,6 +891,104 @@ def save_generated_document(
              json.dumps(dict(sections), sort_keys=True, default=str) if sections else None, now)
         )
     return doc_id
+
+
+def _is_unsafe_document_component(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        attributes = os.lstat(path).st_file_attributes
+    except (AttributeError, FileNotFoundError, OSError):
+        return False
+    return bool(attributes & getattr(__import__("stat"), "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _prepare_document_directory(path: Path) -> Path:
+    """Validate and create a directory one component at a time."""
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:] if absolute.anchor else absolute.parts:
+        current = current / component
+        if current.exists() or current.is_symlink():
+            if _is_unsafe_document_component(current) or not current.is_dir():
+                raise ValueError("Generated document storage contains an unsafe path component.")
+        else:
+            current.mkdir()
+            if _is_unsafe_document_component(current) or not current.is_dir():
+                raise ValueError("Generated document storage path became unsafe.")
+    return absolute
+
+
+def publish_generated_document(
+    document_id: str,
+    data: bytes,
+    file_path: str,
+    *,
+    documents_dir: str | Path = DEFAULT_DOCUMENTS_DIR,
+) -> Path:
+    """Publish bytes with temporary-file durability and exclusive no-clobber semantics."""
+    raw = str(file_path).replace("\\", "/")
+    parts = raw.split("/")
+    if not parts or parts[0].lower() != "documents" or len(parts) < 2 or any(not p or p in {".", ".."} for p in parts):
+        raise ValueError("Generated document path is unsafe.")
+    root = _prepare_document_directory(Path(documents_dir))
+    final_path = root.joinpath(*parts[1:])
+    _prepare_document_directory(final_path.parent)
+    if _is_unsafe_document_component(final_path) or final_path.exists():
+        raise FileExistsError("Generated document already exists.")
+    temporary_path: Path | None = None
+    try:
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{document_id}-", suffix=".tmp", dir=final_path.parent)
+        temporary_path = Path(temporary_name)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if temporary_path.stat().st_size != len(data) or temporary_path.stat().st_size == 0:
+            raise IOError("Generated document temporary file failed validation.")
+        # Hard-link publication is exclusive and same-filesystem; it fails if
+        # another document already occupies the final path.
+        os.link(temporary_path, final_path)
+        temporary_path.unlink()
+        temporary_path = None
+        return final_path
+    except Exception:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except Exception as cleanup_error:
+                logger.error("Generated document temporary cleanup failed for document %s: %s", document_id, cleanup_error)
+        raise
+
+
+def resolve_generated_document_path(
+    document_id: str,
+    *,
+    user_id: int,
+    workspace_id: int,
+    path: str | Path = DEFAULT_DB_PATH,
+    documents_dir: str | Path = DEFAULT_DOCUMENTS_DIR,
+) -> Path:
+    """Resolve an owned generated document to a safe regular file path."""
+    record = get_generated_document(document_id, path=path, user_id=user_id, workspace_id=workspace_id)
+    if record is None:
+        raise PermissionError("Generated document is not available to this user.")
+    raw = str(record.get("file_path") or "").replace("\\", "/")
+    parts = raw.split("/")
+    if parts and parts[0].lower() == "documents":
+        parts = parts[1:]
+    if not parts or any(not part or part in {".", ".."} for part in parts) or Path(raw).drive or raw.startswith(("/", "//")):
+        raise ValueError("Generated document path is unsafe.")
+    root = Path(documents_dir).resolve()
+    candidate = root.joinpath(*parts)
+    if candidate.is_symlink() or not candidate.exists():
+        raise FileNotFoundError("Generated document is missing or unsafe.")
+    resolved = candidate.resolve()
+    if root != resolved and root not in resolved.parents:
+        raise ValueError("Generated document path is outside storage.")
+    if not resolved.is_file():
+        raise ValueError("Generated document is not a regular file.")
+    return resolved
 
 
 def list_generated_documents(

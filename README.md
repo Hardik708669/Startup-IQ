@@ -65,7 +65,30 @@ Slides use a dark professional colour scheme with a cover gradient, white body s
 5. Click **Generate Business Plan (DOCX)** or **Generate Pitch Deck (PPTX)**.
 6. Click the **Download** button to save the file.
 
-Generated files are stored under `data/documents/` (gitignored). Version metadata is recorded in the local SQLite database and shown in the **Previously Generated Document Versions** panel.
+Generated files are stored under `data/documents/workspace-<workspace-id>/` (gitignored), using UUID-backed filenames such as `business-plan-neurosync-<document-id>.docx` and `pitch-deck-neurosync-<document-id>.pptx`. The database record stores the owner, workspace, assessment, and relative file path. Documents are not shared merely because two workspaces use the same startup name; file access must resolve an ownership-scoped database record first. Version metadata is recorded in the local SQLite database and shown in the **Previously Generated Document Versions** panel.
+
+Persisted documents are written to an exclusive temporary file, flushed, fsynced,
+validated, and published without replacing an existing final path. Database
+registration validates the complete user, workspace, startup, and assessment
+ownership graph. If registration fails after publication, the newly published file
+is removed where possible; an abrupt process crash between filesystem publication
+and SQLite registration can still leave a stale orphan requiring operator cleanup.
+Cleanup failures are logged with operation context without replacing the original
+generation or registration error. New registrations require explicit, authorized
+user and workspace ownership; legacy unowned records remain readable only through
+safe legacy paths and cannot receive new generated-document registrations.
+Workspace storage parents are checked for symlinks, junctions, and reparse points
+before missing directories are created.
+
+Historical document metadata and assessment snapshots remain owner-scoped in
+SQLite. Previously generated legacy files that used shared startup-slug paths are
+not renamed automatically; if such a path was overwritten before this isolation
+change, the original bytes cannot be recovered by the application. New documents
+use isolated storage paths and exclusive file creation. Storage is local and
+unencrypted; this is not a claim of encryption at rest or production object storage.
+Backup and restore tests also verify nested workspace document paths and their
+SQLite references. Path validation occurs before opening, but ordinary path-based
+validation cannot eliminate every same-host TOCTOU race.
 
 Historical assessments also support document generation from their immutable saved snapshots.
 
