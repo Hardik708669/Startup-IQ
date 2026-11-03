@@ -1,12 +1,16 @@
 """Startup IQ intake, assessment, and results dashboard interface."""
 
 import re
+import logging
+import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 import plotly.graph_objects as go
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 from intake import split_lines, validate_submission
 from assessment import EVIDENCE_STATUSES, get_dimension_question, reset_assessment_state, validate_assessment_entries
@@ -31,7 +35,8 @@ from database import (DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR, EVIDENCE_TYPES, VE
                        save_assessment, save_evidence, save_generated_document, store_attachment,
                        update_evidence, create_user, get_user_by_email, get_user_by_id,
                        update_user_last_login, create_workspace, list_user_workspaces,
-                       get_workspace, update_workspace, archive_workspace, bootstrap_legacy_ownership)
+                       get_workspace, update_workspace, archive_workspace, bootstrap_legacy_ownership,
+                       publish_generated_document)
 from auth_service import (hash_password, verify_password, validate_password_strength,
                           validate_email, create_session_token, verify_session_token)
 
@@ -1126,27 +1131,40 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
                     recommendations=assessment_record.get("recommendations", []) if assessment_record else (st.session_state.recommendations or ()),
                 )
                 docx_bytes = create_business_plan_docx(profile, bp_sections)
-                # Save to disk and database if assessment exists
+                # Persist only for an owned, saved assessment. Active unsaved
+                # previews remain in session state and are not written to disk.
                 s_name = re.sub(r"[^A-Za-z0-9]+", "-", str(profile.get("startup_name", "startup"))).lower()
-                doc_fname = f"business-plan-{s_name}.docx"
-                file_rel = f"documents/{doc_fname}"
-                out_disk = DEFAULT_DOCUMENTS_DIR / doc_fname
-                out_disk.parent.mkdir(parents=True, exist_ok=True)
-                out_disk.write_bytes(docx_bytes)
-
-                if assessment_record and database_error is None:
-                    save_generated_document(
-                        startup_id=ensure_startup(profile, workspace_id=_wsid, user_id=_uid),
-                        assessment_id=assessment_record["id"],
-                        document_type="Business Plan",
-                        title=f"{profile.get('startup_name')} - Business Plan",
-                        file_path=file_rel,
-                        file_format="docx",
-                        generation_mode="verified_snapshot",
-                        sections=bp_sections,
-                        workspace_id=_wsid,
-                        user_id=_uid,
-                    )
+                document_id = str(uuid.uuid4())
+                doc_fname = f"business-plan-{s_name}-{document_id[:12]}.docx"
+                file_rel = f"documents/workspace-{_wsid}/{doc_fname}"
+                published_path = None
+                if assessment_record:
+                    if database_error is not None:
+                        raise RuntimeError("Database is unavailable; document was not persisted.")
+                    published_path = publish_generated_document(document_id, docx_bytes, file_rel)
+                try:
+                    if assessment_record:
+                        save_generated_document(
+                            startup_id=ensure_startup(profile, workspace_id=_wsid, user_id=_uid),
+                            assessment_id=assessment_record["id"],
+                            document_type="Business Plan",
+                            title=f"{profile.get('startup_name')} - Business Plan",
+                            file_path=file_rel,
+                            file_format="docx",
+                            generation_mode="verified_snapshot",
+                            sections=bp_sections,
+                            workspace_id=_wsid,
+                            user_id=_uid,
+                            document_id=document_id,
+                        )
+                except Exception:
+                    if published_path is not None:
+                        try:
+                            published_path.unlink(missing_ok=True)
+                        except Exception as cleanup_error:
+                            logger.error("Business Plan cleanup failed after registration error: %s", cleanup_error)
+                            st.error(f"Document cleanup failed: {cleanup_error}")
+                    raise
                 st.session_state[bp_key] = docx_bytes
                 st.session_state[bp_fname_key] = doc_fname
                 st.success("Business plan generated successfully!")
@@ -1187,25 +1205,37 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
                 )
                 pptx_bytes = create_pitch_deck_pptx(profile, deck_slides)
                 s_name = re.sub(r"[^A-Za-z0-9]+", "-", str(profile.get("startup_name", "startup"))).lower()
-                doc_fname = f"pitch-deck-{s_name}.pptx"
-                file_rel = f"documents/{doc_fname}"
-                out_disk = DEFAULT_DOCUMENTS_DIR / doc_fname
-                out_disk.parent.mkdir(parents=True, exist_ok=True)
-                out_disk.write_bytes(pptx_bytes)
-
-                if assessment_record and database_error is None:
-                    save_generated_document(
-                        startup_id=ensure_startup(profile, workspace_id=_wsid, user_id=_uid),
-                        assessment_id=assessment_record["id"],
-                        document_type="Pitch Deck",
-                        title=f"{profile.get('startup_name')} - Pitch Deck",
-                        file_path=file_rel,
-                        file_format="pptx",
-                        generation_mode="verified_snapshot",
-                        sections={k: v.get("bullets", []) for k, v in deck_slides.items()},
-                        workspace_id=_wsid,
-                        user_id=_uid,
-                    )
+                document_id = str(uuid.uuid4())
+                doc_fname = f"pitch-deck-{s_name}-{document_id[:12]}.pptx"
+                file_rel = f"documents/workspace-{_wsid}/{doc_fname}"
+                published_path = None
+                if assessment_record:
+                    if database_error is not None:
+                        raise RuntimeError("Database is unavailable; document was not persisted.")
+                    published_path = publish_generated_document(document_id, pptx_bytes, file_rel)
+                try:
+                    if assessment_record:
+                        save_generated_document(
+                            startup_id=ensure_startup(profile, workspace_id=_wsid, user_id=_uid),
+                            assessment_id=assessment_record["id"],
+                            document_type="Pitch Deck",
+                            title=f"{profile.get('startup_name')} - Pitch Deck",
+                            file_path=file_rel,
+                            file_format="pptx",
+                            generation_mode="verified_snapshot",
+                            sections={k: v.get("bullets", []) for k, v in deck_slides.items()},
+                            workspace_id=_wsid,
+                            user_id=_uid,
+                            document_id=document_id,
+                        )
+                except Exception:
+                    if published_path is not None:
+                        try:
+                            published_path.unlink(missing_ok=True)
+                        except Exception as cleanup_error:
+                            logger.error("Pitch Deck cleanup failed after registration error: %s", cleanup_error)
+                            st.error(f"Document cleanup failed: {cleanup_error}")
+                    raise
                 st.session_state[deck_key] = pptx_bytes
                 st.session_state[deck_fname_key] = doc_fname
                 st.success("Investor pitch deck generated successfully!")

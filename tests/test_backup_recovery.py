@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 import subprocess
 
@@ -81,6 +82,29 @@ def test_backup_manifest_and_restore_preserve_database_and_files(tmp_path):
     assert (restored / "data" / "documents" / "pitch-deck.pptx").read_bytes() == b"PPTX backup marker"
     assert (restored / "data" / "documents" / "historical-report.html").exists()
     assert (restored / "data" / "startup_iq.db").exists()
+
+
+def test_workspace_scoped_generated_document_backup_restore_preserves_reference(tmp_path):
+    db, attachments, documents, _ = _fixture_data(tmp_path)
+    nested = documents / "workspace-1" / "business-plan-neurosync-unique.docx"
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"workspace-scoped document")
+    document_id = save_generated_document(
+        1, 1, "business_plan", "Scoped Plan",
+        "documents/workspace-1/business-plan-neurosync-unique.docx", "docx",
+        path=db, workspace_id=1, user_id=1, document_id="workspace-scoped-doc",
+    )
+    backup = create_backup(tmp_path / "backups", db_path=db, attachment_dir=attachments, documents_dir=documents, application_stopped=True)
+    manifest = validate_backup(backup)
+    assert "data/documents/workspace-1/business-plan-neurosync-unique.docx" in {item["path"] for item in manifest["files"]}
+    restored = restore_backup(backup, tmp_path / "restored-scoped")
+    restored_db = restored / "data" / "startup_iq.db"
+    with sqlite3.connect(restored_db) as connection:
+        row = connection.execute("SELECT file_path FROM generated_documents WHERE document_id = ?", (document_id,)).fetchone()
+        assert row == ("documents/workspace-1/business-plan-neurosync-unique.docx",)
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert (restored / "data" / row[0]).read_bytes() == b"workspace-scoped document"
 
 
 def test_backup_requires_offline_and_rejects_destination_inside_source(tmp_path):
