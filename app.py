@@ -36,8 +36,8 @@ from database import (DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR, EVIDENCE_TYPES, VE
                        update_evidence, create_user, get_user_by_email, get_user_by_id,
                        update_user_last_login, create_workspace, list_user_workspaces,
                        get_workspace, update_workspace, archive_workspace, bootstrap_legacy_ownership,
-                       publish_generated_document, login_rate_limit_status, record_login_failure,
-                       reset_login_failures, reserve_login_attempt)
+                       publish_generated_document, reset_login_failures,
+                       reserve_login_attempt, finalize_login_attempt)
 from auth_service import (hash_password, verify_password, validate_password_strength,
                           validate_email, create_session_token, verify_session_token,
                           revoke_session_token, normalize_login_identifier, security_event,
@@ -129,16 +129,22 @@ def _render_auth_wall() -> None:
         if login_btn:
             identifier = normalize_login_identifier(email_in)
             rate_config = get_login_rate_limit_config()
-            allowed, _ = reserve_login_attempt(identifier, **rate_config)
+            allowed, _, reservation_id = reserve_login_attempt(identifier, **rate_config)
             if not allowed:
                 security_event("login_rate_limit", outcome="blocked", reason="temporary_cooldown")
                 st.error("Invalid email or password.")
             else:
                 user_row = get_user_by_email(identifier) if identifier else None
-                valid = bool(user_row and verify_password(pw_in, user_row["password_hash"]))
+                verification_error = None
+                try:
+                    valid = bool(user_row and verify_password(pw_in, user_row["password_hash"]))
+                except Exception:
+                    valid = False
+                    verification_error = "password_verification_error"
+                if reservation_id:
+                    finalize_login_attempt(reservation_id, success=bool(valid and user_row and user_row.get("account_status") == "active"), **rate_config)
                 if not valid or user_row.get("account_status") != "active":
-                    locked = record_login_failure(identifier, **rate_config)
-                    security_event("login_failure", outcome="blocked" if locked else "failure", user_id=user_row.get("user_id") if user_row else None, reason="invalid_credentials")
+                    security_event("login_failure", outcome="failure", user_id=user_row.get("user_id") if user_row else None, reason=verification_error or "invalid_credentials")
                     st.error("Invalid email or password.")
                 else:
                     reset_login_failures(identifier)

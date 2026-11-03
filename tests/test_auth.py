@@ -24,7 +24,7 @@ from database import (
     save_assessment, list_assessments, get_assessment, save_generated_document,
     list_generated_documents, get_generated_document
 )
-from database import login_rate_limit_status, record_login_failure, reset_login_failures, get_auth_session, reserve_login_attempt
+from database import login_rate_limit_status, record_login_failure, reset_login_failures, get_auth_session, reserve_login_attempt, finalize_login_attempt, cleanup_expired_login_reservations
 from scoring import AssessmentResult, DimensionScore
 from recommendations import Recommendation
 
@@ -162,6 +162,27 @@ def test_atomic_login_attempt_reservation_limits_concurrent_requests(temp_db: Pa
     for thread in threads: thread.start()
     for thread in threads: thread.join()
     assert sum(results) == 5
+
+
+def test_reserved_attempt_finalizes_once_and_success_resets(temp_db: Path):
+    allowed, _, reservation = reserve_login_attempt("one@example.com", path=temp_db)
+    assert allowed and reservation
+    assert finalize_login_attempt(reservation, success=False, path=temp_db) is True
+    assert finalize_login_attempt(reservation, success=False, path=temp_db) is False
+    with sqlite3.connect(temp_db) as connection:
+        assert connection.execute("SELECT failed_count FROM login_attempts WHERE identifier = ?", ("one@example.com",)).fetchone()[0] == 1
+    allowed, _, reservation = reserve_login_attempt("one@example.com", path=temp_db)
+    assert allowed and reservation
+    assert finalize_login_attempt(reservation, success=True, path=temp_db) is True
+    assert login_rate_limit_status("one@example.com", path=temp_db) == (False, 0)
+
+
+def test_abandoned_login_reservations_expire(temp_db: Path):
+    old = datetime.now(timezone.utc) - timedelta(seconds=301)
+    allowed, _, reservation = reserve_login_attempt("abandoned@example.com", reservation_ttl_seconds=300, path=temp_db, now=old)
+    assert allowed and reservation
+    assert cleanup_expired_login_reservations(temp_db, now=datetime.now(timezone.utc)) == 1
+    assert reserve_login_attempt("abandoned@example.com", path=temp_db)[0] is True
 
 
 def test_persistent_login_rate_limit_normalizes_and_resets(temp_db: Path):
