@@ -7,11 +7,13 @@ from __future__ import annotations
 import pytest
 import sqlite3
 import os
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from auth_service import (
     hash_password, verify_password, validate_password_strength, validate_email,
-    create_session_token, verify_session_token, get_jwt_secret
+    create_session_token, verify_session_token, get_jwt_secret, revoke_session_token,
+    revoke_all_sessions, security_event
 )
 from database import (
     initialize_database, backup_database, create_user, get_user_by_email, get_user_by_id,
@@ -21,6 +23,7 @@ from database import (
     save_assessment, list_assessments, get_assessment, save_generated_document,
     list_generated_documents, get_generated_document
 )
+from database import login_rate_limit_status, record_login_failure, reset_login_failures, get_auth_session
 from scoring import AssessmentResult, DimensionScore
 from recommendations import Recommendation
 
@@ -100,6 +103,45 @@ def test_session_token_lifecycle():
     # Invalid token check
     assert verify_session_token("invalid.token.signature") is None
     assert verify_session_token("") is None
+
+
+def test_database_backed_session_revocation_and_restart(temp_db: Path):
+    token_a = create_session_token(42, "session-a@test.com", path=temp_db)
+    token_b = create_session_token(42, "session-b@test.com", path=temp_db)
+    assert verify_session_token(token_a, path=temp_db) is not None
+    revoke_session_token(token_a, path=temp_db)
+    assert verify_session_token(token_a, path=temp_db) is None
+    assert verify_session_token(token_b, path=temp_db) is not None
+    revoke_all_sessions(42, path=temp_db)
+    assert verify_session_token(token_b, path=temp_db) is None
+    assert get_auth_session("missing", temp_db) is None
+
+
+def test_tokens_without_jti_are_rejected(monkeypatch, temp_db: Path):
+    import jwt
+    payload = {"user_id": 1, "email": "old@test.com", "iat": 1, "exp": int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp())}
+    token = jwt.encode(payload, get_jwt_secret(), algorithm="HS256")
+    assert verify_session_token(token, path=temp_db) is None
+
+
+def test_persistent_login_rate_limit_normalizes_and_resets(temp_db: Path):
+    identifier = "User@Example.com"
+    for _ in range(4):
+        assert record_login_failure(identifier.strip().lower(), max_attempts=5, path=temp_db) is False
+    assert login_rate_limit_status(" user@example.com ", path=temp_db)[0] is False
+    assert record_login_failure("user@example.com", max_attempts=5, cooldown_seconds=60, path=temp_db) is True
+    assert login_rate_limit_status("USER@example.com", path=temp_db)[0] is True
+    reset_login_failures("user@example.com", path=temp_db)
+    assert login_rate_limit_status("user@example.com", path=temp_db)[0] is False
+
+
+def test_security_event_does_not_log_token_or_secret(caplog):
+    secret = "do-not-log-secret"
+    token = "jwt-token-value"
+    with caplog.at_level("INFO"):
+        security_event("login_failure", outcome="failure", reason="invalid_credentials")
+    assert secret not in caplog.text
+    assert token not in caplog.text
 
 
 def test_development_environment_keeps_local_fallback(monkeypatch):

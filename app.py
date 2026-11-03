@@ -36,9 +36,12 @@ from database import (DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR, EVIDENCE_TYPES, VE
                        update_evidence, create_user, get_user_by_email, get_user_by_id,
                        update_user_last_login, create_workspace, list_user_workspaces,
                        get_workspace, update_workspace, archive_workspace, bootstrap_legacy_ownership,
-                       publish_generated_document)
+                       publish_generated_document, login_rate_limit_status, record_login_failure,
+                       reset_login_failures)
 from auth_service import (hash_password, verify_password, validate_password_strength,
-                          validate_email, create_session_token, verify_session_token)
+                          validate_email, create_session_token, verify_session_token,
+                          revoke_session_token, normalize_login_identifier, security_event,
+                          get_login_rate_limit_config)
 
 st.set_page_config(page_title="Startup IQ | Startup Intake", page_icon="📊", layout="wide")
 
@@ -75,6 +78,10 @@ if "_auth_tab" not in st.session_state:
 
 def _do_logout() -> None:
     """Clear all auth and workspace session state and rerun."""
+    token = st.session_state.get("auth_token")
+    if token:
+        revoke_session_token(token)
+        security_event("logout", outcome="success", user_id=st.session_state.get("current_user_id"))
     for key in ["auth_token", "current_user_id", "current_user_email", "current_user_name",
                 "active_workspace_id", "active_workspace_name", "startup_profile",
                 "assessment_entries", "assessment_result", "recommendations",
@@ -114,15 +121,21 @@ def _render_auth_wall() -> None:
             pw_in = st.text_input("Password", type="password", key="login_pw")
             login_btn = st.form_submit_button("Log in", type="primary", width="stretch")
         if login_btn:
-            if not email_in.strip() or not pw_in:
-                st.error("Please enter your email and password.")
+            identifier = normalize_login_identifier(email_in)
+            rate_config = get_login_rate_limit_config()
+            limited, _ = login_rate_limit_status(identifier, **rate_config)
+            if limited:
+                security_event("login_rate_limit", outcome="blocked", reason="temporary_cooldown")
+                st.error("Invalid email or password.")
             else:
-                user_row = get_user_by_email(email_in.strip())
-                if user_row is None or not verify_password(pw_in, user_row["password_hash"]):
+                user_row = get_user_by_email(identifier) if identifier else None
+                valid = bool(user_row and verify_password(pw_in, user_row["password_hash"]))
+                if not valid or user_row.get("account_status") != "active":
+                    locked = record_login_failure(identifier, **rate_config)
+                    security_event("login_failure", outcome="blocked" if locked else "failure", user_id=user_row.get("user_id") if user_row else None, reason="invalid_credentials")
                     st.error("Invalid email or password.")
-                elif user_row.get("account_status") != "active":
-                    st.error("This account has been deactivated. Contact support.")
                 else:
+                    reset_login_failures(identifier)
                     token = create_session_token(user_row["user_id"], user_row["email"])
                     st.session_state.auth_token = token
                     st.session_state.current_user_id = user_row["user_id"]
