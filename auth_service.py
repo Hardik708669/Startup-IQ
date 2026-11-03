@@ -25,29 +25,43 @@ _hasher = argon2.PasswordHasher(
 JWT_ALGORITHM = "HS256"
 SESSION_EXPIRATION_HOURS = 24
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+SUPPORTED_APP_ENVIRONMENTS = {"development", "test", "production"}
+DEVELOPMENT_FALLBACK_SECRET = "startup-iq-local-development-secret-key-32b-min"
+PLACEHOLDER_SECRETS = {
+    "your-32-char-min-secret-key-here",
+    "your-32-char-min-cryptographic-secret-here",
+    "change-me",
+    "changeme",
+    DEVELOPMENT_FALLBACK_SECRET,
+}
+
+
+def get_application_environment() -> str:
+    """Return the normalized application environment or fail closed."""
+    configured = os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or "development"
+    environment = configured.strip().lower()
+    if environment not in SUPPORTED_APP_ENVIRONMENTS:
+        raise RuntimeError("Unsupported APP_ENV. Use one of: development, test, production.")
+    return environment
 
 
 def get_jwt_secret() -> str:
-    """Retrieve secret key from environment.
-    
-    In production (ENVIRONMENT=production or APP_ENV=production), AUTH_JWT_SECRET
-    is strictly required and cannot fall back to an insecure default.
-    """
-    secret = os.getenv("AUTH_JWT_SECRET") or os.getenv("SECRET_KEY")
-    is_prod = os.getenv("ENVIRONMENT", "").lower() == "production" or os.getenv("APP_ENV", "").lower() == "production"
-    
-    if not secret:
-        if is_prod:
-            raise RuntimeError(
-                "CRITICAL SECURITY CONFIGURATION ERROR: AUTH_JWT_SECRET must be set in production. "
-                "Insecure fallback secrets are disabled in production environments."
-            )
-        # Default local development fallback secret (only allowed in development/testing)
-        secret = "startup-iq-local-development-secret-key-32b-min"
-    elif len(secret) < 32 and is_prod:
-        raise RuntimeError("CRITICAL SECURITY ERROR: AUTH_JWT_SECRET must be at least 32 characters in production.")
-        
-    return secret
+    """Return the JWT secret without exposing it in errors or logs."""
+    environment = get_application_environment()
+    configured_secret = os.getenv("AUTH_JWT_SECRET")
+
+    if environment == "production":
+        if not configured_secret or not configured_secret.strip():
+            raise RuntimeError("CRITICAL SECURITY CONFIGURATION ERROR: AUTH_JWT_SECRET is required in production.")
+        secret = configured_secret.strip()
+        if secret.lower() in PLACEHOLDER_SECRETS:
+            raise RuntimeError("CRITICAL SECURITY CONFIGURATION ERROR: AUTH_JWT_SECRET must not be a placeholder or development secret.")
+        if len(secret) < 32:
+            raise RuntimeError("CRITICAL SECURITY CONFIGURATION ERROR: AUTH_JWT_SECRET must be at least 32 characters in production.")
+        return secret
+
+    # Local development/test compatibility; retain SECRET_KEY as a legacy alias.
+    return configured_secret.strip() if configured_secret and configured_secret.strip() else os.getenv("SECRET_KEY", "").strip() or DEVELOPMENT_FALLBACK_SECRET
 
 
 def hash_password(password: str) -> str:

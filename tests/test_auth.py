@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import pytest
 import sqlite3
+import os
 from pathlib import Path
 
 from auth_service import (
     hash_password, verify_password, validate_password_strength, validate_email,
-    create_session_token, verify_session_token
+    create_session_token, verify_session_token, get_jwt_secret
 )
 from database import (
     initialize_database, backup_database, create_user, get_user_by_email, get_user_by_id,
@@ -99,6 +100,46 @@ def test_session_token_lifecycle():
     # Invalid token check
     assert verify_session_token("invalid.token.signature") is None
     assert verify_session_token("") is None
+
+
+def test_development_environment_keeps_local_fallback(monkeypatch):
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("AUTH_JWT_SECRET", raising=False)
+    monkeypatch.delenv("SECRET_KEY", raising=False)
+    assert get_jwt_secret() == "startup-iq-local-development-secret-key-32b-min"
+
+
+@pytest.mark.parametrize("configured_secret", [None, "", "your-32-char-min-secret-key-here", "change-me", "short-secret"])
+def test_production_rejects_missing_placeholder_and_short_secrets(monkeypatch, configured_secret):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    if configured_secret is None:
+        monkeypatch.delenv("AUTH_JWT_SECRET", raising=False)
+    else:
+        monkeypatch.setenv("AUTH_JWT_SECRET", configured_secret)
+    with pytest.raises(RuntimeError) as error:
+        get_jwt_secret()
+    assert "AUTH_JWT_SECRET" in str(error.value)
+    assert configured_secret not in str(error.value) if configured_secret else True
+
+
+def test_production_accepts_strong_secret_and_preserves_jwt_expiration(monkeypatch):
+    strong_secret = "test-only-production-secret-" + "x" * 40
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AUTH_JWT_SECRET", strong_secret)
+    token = create_session_token(42, "prod@example.test", expires_in_hours=1)
+    payload = verify_session_token(token)
+    assert payload is not None
+    assert payload["user_id"] == 42
+    assert verify_session_token(create_session_token(42, "prod@example.test", expires_in_hours=-1)) is None
+
+
+def test_unknown_application_environment_fails_closed(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "staging-ish")
+    monkeypatch.setenv("AUTH_JWT_SECRET", "test-only-secret-" + "x" * 40)
+    with pytest.raises(RuntimeError, match="Unsupported APP_ENV"):
+        get_jwt_secret()
 
 
 # ===========================================================================

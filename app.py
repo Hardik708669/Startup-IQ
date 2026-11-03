@@ -107,7 +107,7 @@ def _render_auth_wall() -> None:
         with st.form("login_form"):
             email_in = st.text_input("Email address", key="login_email")
             pw_in = st.text_input("Password", type="password", key="login_pw")
-            login_btn = st.form_submit_button("Log in", type="primary", use_container_width=True)
+            login_btn = st.form_submit_button("Log in", type="primary", width="stretch")
         if login_btn:
             if not email_in.strip() or not pw_in:
                 st.error("Please enter your email and password.")
@@ -139,7 +139,7 @@ def _render_auth_wall() -> None:
             pw_reg = st.text_input("Password", type="password", key="reg_pw",
                                    help="Minimum 8 characters, one uppercase, one lowercase, one digit.")
             pw_confirm = st.text_input("Confirm password", type="password", key="reg_pw_confirm")
-            reg_btn = st.form_submit_button("Create account", type="primary", use_container_width=True)
+            reg_btn = st.form_submit_button("Create account", type="primary", width="stretch")
         if reg_btn:
             errs: list[str] = []
             if not full_name_in.strip():
@@ -244,7 +244,7 @@ with st.sidebar:
         st.caption(f"🗂 **{st.session_state.active_workspace_name}**")
 
     st.markdown("---")
-    if st.button("🚪 Log out", use_container_width=True):
+    if st.button("🚪 Log out", width="stretch"):
         _do_logout()
 
 # Convenience aliases used throughout the page
@@ -302,7 +302,7 @@ ai_raw_input = st.text_area(
 )
 col_ai1, col_ai2 = st.columns([1, 4])
 with col_ai1:
-    analyze_clicked = st.button("AI Analyse", type="secondary", use_container_width=True)
+    analyze_clicked = st.button("AI Analyse", type="secondary", width="stretch")
 if analyze_clicked:
     if not ai_raw_input.strip():
         st.error("Please enter a startup description before running AI analysis.")
@@ -476,7 +476,7 @@ with st.form("startup_intake_form"):
     evidence_records = field("Evidence records (one item per line)", "evidence_records", help_text="Include a description, source/URL, date, and related dimension where available.")
     unknown_information = field("Information not yet known", "unknown_information", help_text="List gaps explicitly. Missing information is not automatically a zero.")
 
-    submitted = st.form_submit_button("Review startup profile", type="primary", use_container_width=True)
+    submitted = st.form_submit_button("Review startup profile", type="primary", width="stretch")
 
 
 def render_summary_field(label: str, value: object) -> None:
@@ -881,7 +881,7 @@ if st.session_state.startup_profile is not None:
                     "evidence_status": evidence_status,
                     "rationale": rationale,
                 }
-            assessment_submitted = st.form_submit_button("Save assessment inputs", type="primary", use_container_width=True)
+            assessment_submitted = st.form_submit_button("Save assessment inputs", type="primary", width="stretch")
 
         if assessment_submitted:
             errors = validate_assessment_entries(assessment_entries)
@@ -949,7 +949,7 @@ if st.session_state.startup_profile is not None:
                 height=430,
                 margin={"l": 10, "r": 55, "t": 65, "b": 45},
             )
-            st.plotly_chart(chart, use_container_width=True)
+            st.plotly_chart(chart, width="stretch")
 
             st.markdown("### Dimension breakdown")
             for row in rows:
@@ -990,7 +990,7 @@ if st.session_state.startup_profile is not None:
                 data=report_html,
                 file_name=report_filename(profile.get("startup_name", "startup"), st.session_state.assessment_date or "assessment"),
                 mime="text/html",
-                use_container_width=True,
+                width="stretch",
             )
             st.markdown("### Rule-based recommendations")
             if not recommendations:
@@ -1158,7 +1158,7 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
                 file_name=st.session_state.get(bp_fname_key, "business-plan.docx"),
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 key=f"dl_btn_bp{record_suffix}",
             )
 
@@ -1217,7 +1217,7 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
                 file_name=st.session_state.get(deck_fname_key, "pitch-deck.pptx"),
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 key=f"dl_btn_deck{record_suffix}",
             )
 
