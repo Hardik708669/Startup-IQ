@@ -81,11 +81,14 @@ These are included in `requirements.txt`.
 ### Running browser verification tests
 
 ```powershell
+python -m playwright install chromium
 python run_browser_verification.py
 ```
 
-Requires Microsoft Edge installed and `playwright` (`pip install playwright && playwright install`).
-Screenshots are saved to the `reports/` directory.
+The browser verification suite uses Playwright-managed Chromium by default. Set
+`PLAYWRIGHT_BROWSER=msedge` to use an installed Microsoft Edge channel instead.
+Screenshots are saved to the temporary verification workspace and are not part
+of the repository.
 
 ## Rubric
 
@@ -95,14 +98,47 @@ Market Potential 20%, Problem & Solution Clarity 15%, Competitive Position 15%, 
 
 The project uses Python, Streamlit, Plotly, SQLite (`sqlite3`), `python-dotenv`, and pytest. `app.py` is the UI entry point; `scoring.py` owns the canonical rubric; `assessment.py` validates inputs; `dashboard.py` formats result data; `recommendations.py` provides deterministic guidance; `report_generator.py` creates HTML reports; and `database.py` stores local history. `docs/` contains scope and assessment specifications, `sample_data/` contains fictional data, and `tests/` contains automated tests.
 
-## Windows PowerShell setup
+## Development setup
+
+Startup IQ supports Python 3.11 or newer; Python 3.13 is currently exercised
+in the development environment. Use a project-local virtual environment for
+normal work, or create one outside the repository for a clean validation run.
+
+### Windows PowerShell
 
 ```powershell
-python --version
+py --version
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
+python -m playwright install chromium
 ```
+
+### Git Bash
+
+```bash
+python --version
+python -m venv .venv
+source .venv/Scripts/activate
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
+python -m playwright install chromium
+```
+
+`requirements.txt` contains application/runtime dependencies. `requirements-dev.txt`
+includes those dependencies plus pytest and the pinned Playwright test runner.
+
+Optional AI and authentication configuration can be created without secrets in
+the repository by copying `.env.example` to `.env`:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+For production, set a strong `AUTH_JWT_SECRET`; do not use the development
+fallback. AI provider keys are optional because the local heuristic fallback is
+available.
 
 Run the application:
 
@@ -114,6 +150,19 @@ Run tests:
 
 ```powershell
 python -m pytest -q
+```
+
+Run browser verification:
+
+```powershell
+python run_browser_verification.py
+```
+
+To select Microsoft Edge instead of managed Chromium:
+
+```powershell
+$env:PLAYWRIGHT_BROWSER = "msedge"
+python run_browser_verification.py
 ```
 
 ## Local persistence and history

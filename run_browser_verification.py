@@ -8,11 +8,12 @@ import time
 import subprocess
 import shutil
 import tempfile
+import os
 from io import BytesIO
 from pathlib import Path
 from docx import Document
 from pptx import Presentation
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 ROOT_DIR = Path(__file__).resolve().parent
 ISOLATED_ROOT = Path(tempfile.mkdtemp(prefix="startup-iq-browser-"))
@@ -26,7 +27,7 @@ for source in ROOT_DIR.iterdir():
         shutil.copy2(source, target)
 SHOTS_DIR = ISOLATED_ROOT / "reports"
 SHOTS_DIR.mkdir(parents=True, exist_ok=True)
-EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+PLAYWRIGHT_BROWSER = os.getenv("PLAYWRIGHT_BROWSER", "chromium").strip().lower()
 APP_URL = "http://localhost:8501"
 
 print("=" * 70)
@@ -36,8 +37,8 @@ print("=" * 70)
 results = {}
 console_errors = []
 
-if not Path(EDGE_PATH).exists():
-    print(f"[BLOCKED] Edge executable not found at {EDGE_PATH}")
+if PLAYWRIGHT_BROWSER not in {"chromium", "msedge"}:
+    print("[BLOCKED] PLAYWRIGHT_BROWSER must be 'chromium' or 'msedge'.")
     sys.exit(2)
 
 print("\n[INIT] Starting Streamlit server for browser verification...")
@@ -50,11 +51,22 @@ time.sleep(6)
 
 try:
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            executable_path=EDGE_PATH,
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+        try:
+            if PLAYWRIGHT_BROWSER == "msedge":
+                browser = p.chromium.launch(
+                    channel="msedge",
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
+                )
+            else:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
+                )
+        except PlaywrightError as error:
+            print(f"[BLOCKED] Playwright browser '{PLAYWRIGHT_BROWSER}' is unavailable: {error}")
+            sys.exit(2)
+        print(f"[INIT] Browser engine: Playwright Chromium ({PLAYWRIGHT_BROWSER}).")
         context = browser.new_context(
             viewport={"width": 1280, "height": 900},
             accept_downloads=True,
