@@ -48,14 +48,14 @@ def test_evidence_schema_is_repeatable_and_record_crud(tmp_path):
     evidence_id = save_evidence(profile(), evidence(), path)
     saved = get_evidence(evidence_id, path)
     assert saved["startup_id"] == startup_id
-    assert list_evidence(profile(), path=path)[0]["evidence_title"] == "Interview notes"
+    assert list_evidence(startup_id=startup_id, path=path)[0]["evidence_title"] == "Interview notes"
     assert list_evidence(startup_id=startup_id, dimension="Market Potential", path=path)
     assert list_evidence(startup_id=startup_id, search="interview", path=path)
     assert update_evidence(evidence_id, {"verification_status": "Reviewed by founder"}, path)
     assert get_evidence(evidence_id, path)["verification_status"] == "Reviewed by founder"
     assert archive_evidence(evidence_id, path)
-    assert list_evidence(profile(), path=path) == []
-    assert list_evidence(profile(), include_archived=True, path=path)[0]["archived_at"]
+    assert list_evidence(startup_id=startup_id, path=path) == []
+    assert list_evidence(startup_id=startup_id, include_archived=True, path=path)[0]["archived_at"]
 
 
 def test_evidence_validation_types_and_statuses(tmp_path):
@@ -102,22 +102,22 @@ def test_evidence_filtering_and_searching(tmp_path):
     id3 = save_evidence(p, ev3, path)
     
     # Filter by dimension
-    by_dim = list_evidence(p, dimension="Market Potential", path=path)
+    by_dim = list_evidence(startup_id=startup_id, dimension="Market Potential", path=path)
     assert len(by_dim) == 1
     assert by_dim[0]["evidence_id"] == id1
     
     # Filter by type
-    by_type = list_evidence(p, evidence_type="Competitor research", path=path)
+    by_type = list_evidence(startup_id=startup_id, evidence_type="Competitor research", path=path)
     assert len(by_type) == 1
     assert by_type[0]["evidence_id"] == id2
     
     # Filter by status
-    by_status = list_evidence(p, verification_status="Needs follow-up", path=path)
+    by_status = list_evidence(startup_id=startup_id, verification_status="Needs follow-up", path=path)
     assert len(by_status) == 1
     assert by_status[0]["evidence_id"] == id3
     
     # Search
-    search_res = list_evidence(p, search="Pricing", path=path)
+    search_res = list_evidence(startup_id=startup_id, search="Pricing", path=path)
     assert len(search_res) == 1
     assert search_res[0]["evidence_id"] == id2
 
@@ -232,7 +232,7 @@ def test_supporting_excerpt_persistence_and_snapshots(tmp_path):
     assert retrieved["supporting_excerpt"] == "40 pilot users reported 80% time saved"
 
     # 3. List evidence and verify excerpt
-    listed = list_evidence(p, path=path)
+    listed = list_evidence(startup_id=get_evidence(ev_id, path)["startup_id"], path=path)
     assert len(listed) == 1
     assert listed[0]["supporting_excerpt"] == "40 pilot users reported 80% time saved"
 

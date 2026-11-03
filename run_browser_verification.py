@@ -8,6 +8,7 @@ import time
 import subprocess
 import shutil
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from docx import Document
 from pptx import Presentation
@@ -66,6 +67,51 @@ try:
 
         page.on("console", handle_console)
         page.on("pageerror", lambda err: console_errors.append(f"[PAGEERROR] {err}"))
+
+        def generate_and_inspect_documents(expected_marker: str, should_contain: bool, label: str) -> None:
+            """Generate and inspect all active document downloads for the current user."""
+            page.locator('button', has_text="Continue to seven-dimension assessment").first.click()
+            time.sleep(2)
+            for checkbox_label in page.locator('label', has_text="I reviewed this rating and it reflects the current information").all():
+                checkbox_label.click(force=True)
+            for rationale in page.locator('textarea[aria-label="Supporting rationale or evidence"]').all():
+                rationale.fill("Isolated browser ownership verification rationale.")
+            page.locator('button', has_text="Save assessment inputs").first.click()
+            time.sleep(4)
+            page.get_by_text("Assessment results", exact=True).wait_for(timeout=30000)
+
+            with page.expect_download(timeout=30000) as report_download_info:
+                page.locator('button', has_text="Download Assessment Report").first.click()
+            report_bytes = report_download_info.value.path().read_bytes()
+            report_text = report_bytes.decode("utf-8")
+
+            page.locator('label', has_text="Business Plan (Word DOCX)").click()
+            time.sleep(1)
+            page.locator('button', has_text="Generate Business Plan (DOCX)").first.click()
+            time.sleep(3)
+            with page.expect_download(timeout=30000) as bp_download_info:
+                page.locator('button', has_text="Download Business Plan (.DOCX)").first.click()
+            bp_bytes = bp_download_info.value.path().read_bytes()
+            bp_doc = Document(BytesIO(bp_bytes))
+            bp_text = "\n".join([p.text for p in bp_doc.paragraphs] + [cell.text for table in bp_doc.tables for row in table.rows for cell in row.cells])
+
+            page.locator('label', has_text="Investor Pitch Deck (PowerPoint PPTX)").click()
+            time.sleep(1)
+            page.locator('button', has_text="Generate Pitch Deck (PPTX)").first.click()
+            time.sleep(3)
+            with page.expect_download(timeout=30000) as deck_download_info:
+                page.locator('button', has_text="Download Investor Pitch Deck (.PPTX)").first.click()
+            deck_bytes = deck_download_info.value.path().read_bytes()
+            deck = Presentation(BytesIO(deck_bytes))
+            deck_text = "\n".join(shape.text for slide in deck.slides for shape in slide.shapes if hasattr(shape, "text"))
+
+            assert report_bytes and bp_bytes and deck_bytes
+            all_text = report_text + "\n" + bp_text + "\n" + deck_text
+            if should_contain:
+                assert expected_marker in all_text, f"{label}: owner marker missing from generated output."
+            else:
+                assert expected_marker not in all_text, f"{label}: foreign marker leaked into generated output."
+            assert "Previously Generated Document Versions" in page.locator('body').inner_text()
 
         # -------------------------------------------------------------
         # SCENARIO A: Registration & Duplicate Rejection
@@ -394,6 +440,58 @@ try:
         assert "Alice HealthTech" not in b_sidebar, "Isolation Breach! User B sees User A's startup!"
         print("  [PASS] Strict data isolation verified: User B cannot see User A's assessment history.")
         results["scenario_e_data_isolation_verified"] = True
+
+        # Deliberate same-profile collision: User B submits the exact same
+        # startup profile and must still see an empty Evidence Registry.
+        page.locator('input[aria-label="Startup name *"]').fill("Alice HealthTech AI")
+        page.locator('textarea[aria-label="Short startup description *"]').fill("AI for clinic diagnostics.")
+        page.locator('textarea[aria-label="Problem statement *"]').fill("Clinics take 3 days to analyze tests.")
+        page.locator('textarea[aria-label="Proposed solution *"]').fill("Automated diagnostic machine.")
+        page.locator('textarea[aria-label="Target customers *"]').fill("Regional clinic networks.")
+        page.locator('button', has_text="Review startup profile").first.click()
+        time.sleep(3)
+        b_collision_text = page.locator('body').inner_text()
+        assert "Customer Interview Findings" not in b_collision_text
+        assert "We interviewed 30 neurology clinics" not in b_collision_text
+        print("  [PASS] Same-profile collision does not expose User A evidence to User B.")
+        results["scenario_e_same_profile_collision_blocked"] = True
+
+        # Generate and inspect actual User B report/DOCX/PPTX downloads.
+        generate_and_inspect_documents("We interviewed 30 neurology clinics", False, "User B generated documents")
+        print("  [PASS] User B generated report, Business Plan, and Pitch Deck without User A evidence.")
+        results["scenario_e_generated_documents_blocked"] = True
+
+        # Return to User A and verify the owner retains the record.
+        page.locator('[data-testid="stSidebar"]').locator('button', has_text="Log out").first.click()
+        time.sleep(3)
+        page.locator('label', has_text="Log in").click()
+        time.sleep(1)
+        page.locator('input[aria-label="Email address"]').fill(email_a)
+        page.locator('input[aria-label="Password"]').fill("AlicePass123!")
+        page.locator('button', has_text="Log in").click()
+        time.sleep(4)
+        page.locator('input[aria-label="Startup name *"]').fill("Alice HealthTech AI")
+        page.locator('textarea[aria-label="Short startup description *"]').fill("AI for clinic diagnostics.")
+        page.locator('textarea[aria-label="Problem statement *"]').fill("Clinics take 3 days to analyze tests.")
+        page.locator('textarea[aria-label="Proposed solution *"]').fill("Automated diagnostic machine.")
+        page.locator('textarea[aria-label="Target customers *"]').fill("Regional clinic networks.")
+        page.locator('button', has_text="Review startup profile").first.click()
+        time.sleep(3)
+        a_owner_text = page.locator('body').inner_text()
+        assert "Customer Interview Findings" in a_owner_text
+        owner_record = page.locator('div[data-testid="stExpander"]').filter(has_text="Customer Interview Findings").first
+        if owner_record.count() > 0 and owner_record.locator("summary").count() > 0:
+            owner_record.locator("summary").click()
+            time.sleep(1)
+        assert "We interviewed 30 neurology clinics" in owner_record.inner_text()
+        print("  [PASS] User A retains access after the same-profile collision test.")
+        results["scenario_e_owner_access_retained"] = True
+
+        # Generate and inspect actual User A outputs, including the historical
+        # assessment snapshot created by the preceding save.
+        generate_and_inspect_documents("We interviewed 30 neurology clinics", True, "User A generated documents")
+        print("  [PASS] User A generated report, Business Plan, and Pitch Deck with own evidence.")
+        results["scenario_e_owner_generated_documents"] = True
 
         # -------------------------------------------------------------
         # SCENARIO G: Responsive Layout Check (Mobile 390x844)

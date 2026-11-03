@@ -154,7 +154,7 @@ def test_evidence_suggestions_integration_with_db(tmp_path):
     path = tmp_path / "test_ai_evidence.db"
     initialize_database(path)
     profile = {"startup_name": "NeuroSync", "industry": "HealthTech", "stage": "Idea"}
-    ensure_startup(profile, path)
+    startup_id = ensure_startup(profile, path)
 
     evidence_item = SuggestedEvidence(
         evidence_title="Founder Clinical Interview Notes",
@@ -175,7 +175,7 @@ def test_evidence_suggestions_integration_with_db(tmp_path):
     assert saved["evidence_type"] == "Customer interviews"
 
     # Listed under startup
-    listed = list_evidence(profile, path=path)
+    listed = list_evidence(startup_id=startup_id, path=path)
     assert len(listed) == 1
     assert listed[0]["evidence_id"] == ev_id
     assert listed[0]["supporting_excerpt"] == "Interviewed 30 neurology clinics"

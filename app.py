@@ -376,7 +376,7 @@ if st.session_state.ai_analysis_result is not None:
                 if not ev_cand.is_approved:
                     if st.button("Register as Evidence", key=f"reg_ev_ai_{idx}"):
                         if st.session_state.startup_profile:
-                            save_evidence(st.session_state.startup_profile, ev_cand.as_dict())
+                            save_evidence(st.session_state.startup_profile, ev_cand.as_dict(), workspace_id=_wsid, user_id=_uid)
                             ev_cand.is_approved = True
                             st.success(f"Registered '{ev_cand.evidence_title}' to Evidence Registry!")
                             st.rerun()
@@ -665,15 +665,21 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
                 except Exception as error:
                     st.error(f"Evidence could not be registered: {error}")
 
-    records = list_evidence(profile)
+    records = list_evidence(profile, workspace_id=workspace_id, user_id=user_id)
     filter_cols = st.columns(4)
     search = filter_cols[0].text_input("Search evidence", key="evidence_search")
     dimension_filter = filter_cols[1].selectbox("Filter dimension", ["All"] + [d.name for d in DIMENSIONS], key="evidence_dimension_filter")
     type_filter = filter_cols[2].selectbox("Filter type", ["All"] + list(EVIDENCE_TYPES), key="evidence_type_filter")
     status_filter = filter_cols[3].selectbox("Filter verification", ["All"] + list(VERIFICATION_STATUSES), key="evidence_status_filter")
-    records = list_evidence(profile, dimension=None if dimension_filter == "All" else dimension_filter,
-                            evidence_type=None if type_filter == "All" else type_filter,
-                            verification_status=None if status_filter == "All" else status_filter, search=search)
+    records = list_evidence(
+        profile,
+        dimension=None if dimension_filter == "All" else dimension_filter,
+        evidence_type=None if type_filter == "All" else type_filter,
+        verification_status=None if status_filter == "All" else status_filter,
+        search=search,
+        workspace_id=workspace_id,
+        user_id=user_id,
+    )
     if not records:
         st.info("No registered evidence matches the current filters.")
     for record in records:
@@ -757,7 +763,7 @@ if submitted:
             for ev_cand in st.session_state.ai_analysis_result.suggested_evidence:
                 if ev_cand.is_approved:
                     try:
-                        save_evidence(submission, ev_cand.as_dict())
+                        save_evidence(submission, ev_cand.as_dict(), workspace_id=_wsid, user_id=_uid)
                     except Exception as err:
                         pass
         st.markdown("## Submission summary")
@@ -835,7 +841,7 @@ if st.session_state.startup_profile is not None:
                 
                 # Show relevant evidence records for this dimension
                 if database_error is None:
-                    dim_evidence = list_evidence(profile, dimension=dimension.name)
+                    dim_evidence = list_evidence(profile, dimension=dimension.name, workspace_id=_wsid, user_id=_uid)
                     if dim_evidence:
                         with st.expander(f"Supporting evidence for {dimension.name} ({len(dim_evidence)} registered)", expanded=False):
                             st.caption("Verification labels reflect submitted review state and do not guarantee claim truth. An existing evidence record does not automatically increase or decrease the rating.")
@@ -896,7 +902,7 @@ if st.session_state.startup_profile is not None:
                             st.session_state.assessment_result,
                             st.session_state.recommendations,
                             st.session_state.assessment_date,
-                        evidence_ids=[item["evidence_id"] for item in list_evidence(profile)],
+                        evidence_ids=[item["evidence_id"] for item in list_evidence(profile, workspace_id=_wsid, user_id=_uid)],
                         workspace_id=_wsid,
                         user_id=_uid,
                         )
@@ -977,7 +983,7 @@ if st.session_state.startup_profile is not None:
                 result,
                 recommendations,
                 st.session_state.assessment_date,
-                evidence=list_evidence(profile),
+                evidence=list_evidence(profile, workspace_id=_wsid, user_id=_uid),
             )
             st.download_button(
                 "Download Assessment Report",
@@ -1002,15 +1008,18 @@ if st.session_state.startup_profile is not None:
                 st.session_state.dashboard_view = False
                 st.rerun()
 
-            # Render document generator for the completed active assessment
-            render_document_generator(profile, {
+            # Defer rendering until after the module-level generator function
+            # has been defined below. Streamlit reruns execute this module
+            # top-to-bottom, so calling it here raises NameError on the first
+            # dashboard render.
+            st.session_state._active_document_generator_record = {
                 "id": st.session_state.saved_assessment_id or 0,
                 "profile": profile,
                 "result": result,
                 "recommendations": recommendations,
                 "assessment_date": st.session_state.assessment_date,
-                "evidence": list_evidence(profile),
-            })
+                "evidence": list_evidence(profile, workspace_id=_wsid, user_id=_uid),
+            }
 
 
 def render_historical_assessment(record: dict[str, object]) -> None:
@@ -1101,7 +1110,7 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
             bp_sections = draft_business_plan_content(
                 profile,
                 assessment=assessment_record,
-                evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile),
+                evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile, workspace_id=_wsid, user_id=_uid),
                 recommendations=assessment_record.get("recommendations", []) if assessment_record else (st.session_state.recommendations or ()),
             )
             for title, key in BUSINESS_PLAN_SECTIONS:
@@ -1113,7 +1122,7 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
                 bp_sections = draft_business_plan_content(
                     profile,
                     assessment=assessment_record,
-                    evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile),
+                    evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile, workspace_id=_wsid, user_id=_uid),
                     recommendations=assessment_record.get("recommendations", []) if assessment_record else (st.session_state.recommendations or ()),
                 )
                 docx_bytes = create_business_plan_docx(profile, bp_sections)
@@ -1160,7 +1169,7 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
             deck_slides = draft_pitch_deck_slides(
                 profile,
                 assessment=assessment_record,
-                evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile),
+                evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile, workspace_id=_wsid, user_id=_uid),
             )
             for title, key in PITCH_DECK_SLIDES:
                 s_info = deck_slides.get(key, {})
@@ -1174,7 +1183,7 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
                 deck_slides = draft_pitch_deck_slides(
                     profile,
                     assessment=assessment_record,
-                    evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile),
+                    evidence=assessment_record.get("evidence", []) if assessment_record else list_evidence(profile, workspace_id=_wsid, user_id=_uid),
                 )
                 pptx_bytes = create_pitch_deck_pptx(profile, deck_slides)
                 s_name = re.sub(r"[^A-Za-z0-9]+", "-", str(profile.get("startup_name", "startup"))).lower()
@@ -1214,11 +1223,16 @@ def render_document_generator(profile: dict[str, Any], assessment_record: dict[s
 
     # Document History List
     if database_error is None and assessment_record:
-        doc_history = list_generated_documents(assessment_id=assessment_record["id"])
+        doc_history = list_generated_documents(assessment_id=assessment_record["id"], workspace_id=_wsid, user_id=_uid)
         if doc_history:
             st.markdown("#### Previously Generated Document Versions")
             for doc_item in doc_history:
                 st.caption(f"• **v{doc_item['document_version']}** {doc_item['document_type']} — Format: `{doc_item['file_format'].upper()}` — Created: {doc_item['created_at']}")
+
+
+if st.session_state.get("_active_document_generator_record") is not None:
+    _active_document_record = st.session_state.pop("_active_document_generator_record")
+    render_document_generator(_active_document_record["profile"], _active_document_record)
 
 
 if database_error is None:

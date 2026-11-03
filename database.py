@@ -530,6 +530,8 @@ def list_evidence(
     path: str | Path = DEFAULT_DB_PATH,
 ) -> list[dict[str, Any]]:
     """List evidence scoped to startup, workspace, and owner user."""
+    if profile is not None and workspace_id is None and user_id is None:
+        raise ValueError("Evidence profile queries require workspace_id or user_id ownership scope.")
     initialize_database(path)
     with get_connection(path) as connection:
         if startup_id is None and profile is not None:
