@@ -170,6 +170,18 @@ CREATE TABLE IF NOT EXISTS login_attempt_reservations (
     reserved_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS upload_security_events (
+    upload_id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    workspace_id INTEGER,
+    file_type TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    scan_status TEXT NOT NULL,
+    scanner_name TEXT NOT NULL,
+    reason_category TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 SCHEMA_INDEXES = """
@@ -185,6 +197,7 @@ CREATE INDEX IF NOT EXISTS idx_docs_workspace ON generated_documents(workspace_i
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at);
 CREATE INDEX IF NOT EXISTS idx_login_attempts_lock ON login_attempts(locked_until);
 CREATE INDEX IF NOT EXISTS idx_login_reservations_identifier ON login_attempt_reservations(identifier, expires_at);
+CREATE INDEX IF NOT EXISTS idx_upload_security_owner ON upload_security_events(user_id, workspace_id, created_at);
 """
 
 SCHEMA = SCHEMA_TABLES + SCHEMA_INDEXES
@@ -861,17 +874,26 @@ def validate_attachment(filename: str, size: int, max_bytes: int = MAX_ATTACHMEN
     return suffix
 
 
-def store_attachment(filename: str, data: bytes, attachment_dir: str | Path = DEFAULT_ATTACHMENT_DIR) -> tuple[str, str, int]:
-    """Store bytes under a UUID filename, preventing path traversal."""
-    suffix = validate_attachment(filename, len(data))
-    directory = Path(attachment_dir).resolve()
-    directory.mkdir(parents=True, exist_ok=True)
-    safe_name = f"{uuid.uuid4().hex}{suffix}"
-    target = (directory / safe_name).resolve()
-    if directory not in target.parents:
-        raise ValueError("Unsafe attachment path.")
-    target.write_bytes(data)
-    return safe_name, Path(filename).name, len(data)
+def record_upload_security_event(upload_id: str, file_type: str, file_size: int, scan_status: str, *, scanner_name: str = "clamscan", reason_category: str | None = None, user_id: int | None = None, workspace_id: int | None = None, path: str | Path = DEFAULT_DB_PATH) -> None:
+    initialize_database(path)
+    allowed_statuses = {"clean", "infected", "skipped", "error"}
+    if scan_status not in allowed_statuses:
+        raise ValueError("Invalid upload scan status.")
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection(path) as connection:
+        connection.execute(
+            "INSERT INTO upload_security_events(upload_id, user_id, workspace_id, file_type, file_size, scan_status, scanner_name, reason_category, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (upload_id, user_id, workspace_id, file_type, int(file_size), scan_status, scanner_name, str(reason_category)[:80] if reason_category else None, now),
+        )
+
+
+def store_attachment(filename: str, data: bytes, attachment_dir: str | Path = DEFAULT_ATTACHMENT_DIR, *, db_path: str | Path, user_id: int, workspace_id: int) -> tuple[str, str, int]:
+    """Compatibility wrapper requiring ownership and scan-event persistence context."""
+    if db_path is None or user_id is None or workspace_id is None:
+        raise ValueError("Database, user, and workspace context are required for attachment storage.")
+    from upload_security import secure_store_attachment
+    stored, original, size, _ = secure_store_attachment(filename, data, attachment_dir, db_path=db_path, user_id=user_id, workspace_id=workspace_id)
+    return stored, original, size
 
 
 def make_submission_key(profile: Mapping[str, Any], inputs: Mapping[str, Any], workspace_id: int | None = None) -> str:

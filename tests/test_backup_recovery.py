@@ -42,7 +42,7 @@ def _fixture_data(tmp_path: Path):
     initialize_database(db)
     user = create_user("Backup User", "backup@example.test", "not-a-real-password-hash", db)
     workspace = create_workspace(user, "Backup Workspace", path=db)
-    attachment, original, size = store_attachment("proof.txt", b"attachment-marker", attachments)
+    attachment, original, size = store_attachment("proof.txt", b"attachment-marker", attachments, db_path=db, user_id=user, workspace_id=workspace)
     profile = {"startup_name": "Backup Co", "industry": "Testing", "stage": "Idea"}
     evidence_id = save_evidence(
         profile,

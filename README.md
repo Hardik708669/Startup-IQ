@@ -177,6 +177,29 @@ tokens, secrets, and document contents are never logged.
 The defaults can be configured with `AUTH_LOGIN_MAX_ATTEMPTS`,
 `AUTH_LOGIN_WINDOW_SECONDS`, and `AUTH_LOGIN_COOLDOWN_SECONDS`.
 
+### Upload security
+
+Supported uploads are PDF, DOCX, XLSX, CSV, TXT, PNG, JPG, and JPEG. Uploads
+remain limited to 10 MB by default and can be configured with `UPLOAD_MAX_BYTES`.
+Server-side signatures and format structure are validated; browser MIME types and
+filenames are not trusted. Files are written with UUID-based names into a
+quarantine workflow, scanned, and promoted only after validation. Office archives
+reject encrypted, traversal, excessive-entry, and excessive-expansion content.
+
+Set `UPLOAD_SCAN_MODE=disabled` only for local development, or `required` to use
+the ClamAV `clamscan` adapter. Production requires `required`; scanner failures
+fail closed. Scanner execution has not been demonstrated in this environment.
+Quarantine files that fail scanning are retained for manual review and controlled
+retention cleanup. Quarantine paths are never exposed in the UI. Extraction and
+AI analysis operate only on validated, accepted bytes, with bounded archive
+processing; scanned PDFs continue to report that OCR is unavailable.
+Application upload registration uses one shared workflow requiring the authenticated
+user, workspace, and database context; scan outcomes are persisted before accepted
+files are associated with evidence. Registration and cleanup failures preserve the
+original error while logging only safe operation identifiers. Filesystem publication
+and SQLite registration are not globally atomic, so an abrupt process crash can
+still leave an orphan requiring reconciliation.
+
 Run the application:
 
 ```powershell
