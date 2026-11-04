@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import logging
 import os
 from pathlib import Path, PurePosixPath
@@ -22,6 +23,11 @@ MAX_EXTRACTED_TEXT = 2 * 1024 * 1024
 
 class UploadSecurityError(ValueError):
     pass
+
+
+def content_fingerprint(data: bytes) -> str:
+    """Return the identity of the uploaded bytes, independent of filename."""
+    return hashlib.sha256(data).hexdigest()
 
 
 def _unsafe_component(path: Path) -> bool:
@@ -185,7 +191,36 @@ def remove_approved_attachment(relative_name: str, attachment_dir: str | Path = 
     target.unlink(missing_ok=True)
 
 
-def secure_register_evidence(profile, evidence: dict, filename: str, data: bytes, *, user_id: int, workspace_id: int, db_path, attachment_dir=DEFAULT_ATTACHMENT_DIR, existing_attachment: tuple[str, str, int] | None = None) -> str:
+def validate_cached_attachment(receipt: dict, data: bytes, *, filename: str,
+                               user_id: int, workspace_id: int,
+                               attachment_dir: str | Path = DEFAULT_ATTACHMENT_DIR) -> bool:
+    """Validate a session-cached upload receipt before it is reused."""
+    if not isinstance(receipt, dict):
+        return False
+    if receipt.get("fingerprint") != content_fingerprint(data):
+        return False
+    if receipt.get("user_id") != user_id or receipt.get("workspace_id") != workspace_id:
+        return False
+    if receipt.get("scan_status") not in {"clean", "skipped"}:
+        return False
+    try:
+        validate_upload(data, filename)
+        stored = str(receipt["attachment_path"])
+        if Path(stored).name != stored or not stored:
+            return False
+        root = _prepare_directory(attachment_dir)
+        target = root / stored
+        if _unsafe_component(target) or not target.is_file():
+            return False
+        if target.stat().st_size != len(data):
+            return False
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        return digest == receipt["fingerprint"]
+    except (OSError, KeyError, TypeError, UploadSecurityError):
+        return False
+
+
+def secure_register_evidence(profile, evidence: dict, filename: str, data: bytes, *, user_id: int, workspace_id: int, db_path, attachment_dir=DEFAULT_ATTACHMENT_DIR, existing_attachment: tuple[str, str, int] | dict | None = None) -> str:
     """Publish a validated attachment and register its evidence with cleanup."""
     from database import save_evidence, get_user_by_id, get_workspace
     if not get_user_by_id(user_id, path=db_path) or not (get_workspace(workspace_id, path=db_path) or {}).get("owner_user_id") == user_id:
@@ -193,7 +228,20 @@ def secure_register_evidence(profile, evidence: dict, filename: str, data: bytes
     if existing_attachment is None:
         stored, original, size, _ = secure_store_attachment(filename, data, attachment_dir, user_id=user_id, workspace_id=workspace_id, db_path=db_path)
     else:
-        stored, original, size = existing_attachment
+        if isinstance(existing_attachment, dict):
+            if not validate_cached_attachment(existing_attachment, data, filename=filename, user_id=user_id, workspace_id=workspace_id, attachment_dir=attachment_dir):
+                raise UploadSecurityError("Cached upload receipt is no longer valid.")
+            stored = existing_attachment["attachment_path"]
+            original = existing_attachment["attachment_original_name"]
+            size = existing_attachment["attachment_size"]
+        else:
+            stored, original, size = existing_attachment
+            if size != len(data):
+                raise UploadSecurityError("Cached upload receipt is no longer valid.")
+            root = _prepare_directory(attachment_dir)
+            target = root / str(stored)
+            if _unsafe_component(target) or not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != content_fingerprint(data):
+                raise UploadSecurityError("Cached upload receipt is no longer valid.")
     payload = dict(evidence)
     payload.update({"attachment_path": stored, "attachment_original_name": original, "attachment_size": size})
     try:

@@ -23,7 +23,7 @@ from ai_service import (
     analyze_startup_idea, analyze_extracted_document, DocumentAnalysisResult, DocumentEvidenceClaim,
 )
 from document_extractor import extract_document_text, ExtractionResult
-from upload_security import secure_store_attachment, secure_register_evidence, remove_approved_attachment, UploadSecurityError, validate_upload
+from upload_security import secure_store_attachment, secure_register_evidence, remove_approved_attachment, UploadSecurityError, validate_upload, content_fingerprint, validate_cached_attachment
 from business_plan_generator import (
     BUSINESS_PLAN_SECTIONS, create_business_plan_docx, draft_business_plan_content,
 )
@@ -550,15 +550,27 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
         )
 
         if doc_upload is not None:
+            doc_bytes = doc_upload.getvalue()
+            doc_fingerprint = content_fingerprint(doc_bytes)
             c_meta1, c_meta2, c_meta3 = st.columns(3)
             c_meta1.caption(f"**Filename:** {doc_upload.name}")
-            c_meta2.caption(f"**Size:** {len(doc_upload.getvalue()) // 1024} KB")
+            c_meta2.caption(f"**Size:** {len(doc_bytes) // 1024} KB")
             c_meta3.caption(f"**Format:** {Path(doc_upload.name).suffix.upper()}")
             try:
-                validate_upload(doc_upload.getvalue(), doc_upload.name)
-                secure_key = f"secure_upload_{doc_upload.name}_{len(doc_upload.getvalue())}"
-                if secure_key not in st.session_state:
-                    st.session_state[secure_key] = secure_store_attachment(doc_upload.name, doc_upload.getvalue(), user_id=_uid, workspace_id=_wsid, db_path=DEFAULT_DB_PATH)
+                validate_upload(doc_bytes, doc_upload.name)
+                secure_key = f"secure_upload_{doc_fingerprint}"
+                cached_receipt = st.session_state.get(secure_key)
+                if not isinstance(cached_receipt, dict) or not validate_cached_attachment(cached_receipt, doc_bytes, filename=doc_upload.name, user_id=_uid, workspace_id=_wsid):
+                    stored, original, size, scan_status = secure_store_attachment(doc_upload.name, doc_bytes, user_id=_uid, workspace_id=_wsid, db_path=DEFAULT_DB_PATH)
+                    st.session_state[secure_key] = {
+                        "attachment_path": stored,
+                        "attachment_original_name": original,
+                        "attachment_size": size,
+                        "scan_status": scan_status,
+                        "fingerprint": doc_fingerprint,
+                        "user_id": _uid,
+                        "workspace_id": _wsid,
+                    }
             except UploadSecurityError as error:
                 st.error(str(error))
                 st.stop()
@@ -570,15 +582,17 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
                 analyze_doc_btn = st.button("Extract & Run AI Analysis", type="primary", key="btn_analyze_doc_text")
 
             # Session storage for extracted text and findings
-            if f"ext_text_{doc_upload.name}" not in st.session_state:
-                st.session_state[f"ext_text_{doc_upload.name}"] = None
-            if f"doc_analysis_{doc_upload.name}" not in st.session_state:
-                st.session_state[f"doc_analysis_{doc_upload.name}"] = None
+            ext_key = f"ext_text_{doc_fingerprint}"
+            analysis_key = f"doc_analysis_{doc_fingerprint}"
+            if ext_key not in st.session_state:
+                st.session_state[ext_key] = None
+            if analysis_key not in st.session_state:
+                st.session_state[analysis_key] = None
 
             if extract_btn or analyze_doc_btn:
                 with st.spinner("Extracting text and structured data from document..."):
-                    ext_res: ExtractionResult = extract_document_text(doc_upload.getvalue(), doc_upload.name)
-                    st.session_state[f"ext_text_{doc_upload.name}"] = ext_res
+                    ext_res: ExtractionResult = extract_document_text(doc_bytes, doc_upload.name)
+                    st.session_state[ext_key] = ext_res
 
                     if not ext_res.success:
                         st.error(ext_res.error)
@@ -594,14 +608,14 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
                                 doc_upload.name,
                                 startup_profile=profile
                             )
-                            st.session_state[f"doc_analysis_{doc_upload.name}"] = analysis_doc_res
+                            st.session_state[analysis_key] = analysis_doc_res
 
-            cur_ext: ExtractionResult | None = st.session_state.get(f"ext_text_{doc_upload.name}")
+            cur_ext: ExtractionResult | None = st.session_state.get(ext_key)
             if cur_ext and cur_ext.text:
                 st.markdown("##### Preview Extracted Text")
                 st.text_area("Extracted Content", value=cur_ext.text, height=180, key=f"preview_text_{doc_upload.name}", disabled=True)
 
-            cur_analysis: DocumentAnalysisResult | None = st.session_state.get(f"doc_analysis_{doc_upload.name}")
+            cur_analysis: DocumentAnalysisResult | None = st.session_state.get(analysis_key)
             if cur_analysis:
                 st.markdown("---")
                 st.markdown(f"### 📋 Candidate Evidence Findings ({len(cur_analysis.claims)} found)")
@@ -625,8 +639,7 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
                                     # Also store the uploaded attachment if not yet stored
                                     att_info = {}
                                     try:
-                                        stored, orig, sz, _ = st.session_state[secure_key]
-                                        att_info = {"attachment_path": stored, "attachment_original_name": orig, "attachment_size": sz}
+                                        att_info = st.session_state[secure_key]
                                     except Exception:
                                         pass
 
@@ -643,7 +656,7 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
                                             "verification_status": "Founder submitted",
                                             "founder_notes": f"Extracted via {cur_analysis.provider_used} document analysis. {claim.recommended_verification}.",
                                             **att_info,
-                                        }, doc_upload.name, doc_upload.getvalue(), user_id=user_id, workspace_id=workspace_id, db_path=DEFAULT_DB_PATH, existing_attachment=(att_info["attachment_path"], att_info["attachment_original_name"], att_info["attachment_size"]))
+                                        }, doc_upload.name, doc_bytes, user_id=user_id, workspace_id=workspace_id, db_path=DEFAULT_DB_PATH, existing_attachment=att_info)
                                     except Exception:
                                         if att_info.get("attachment_path"):
                                             remove_approved_attachment(att_info["attachment_path"])

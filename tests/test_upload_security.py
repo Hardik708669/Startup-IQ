@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from upload_security import UploadSecurityError, secure_store_attachment, scan_quarantined_file, validate_upload
+from upload_security import UploadSecurityError, secure_store_attachment, scan_quarantined_file, validate_upload, content_fingerprint, validate_cached_attachment
 from backup_recovery import create_backup, validate_backup
 from database import initialize_database
 
@@ -165,3 +165,57 @@ def test_clamav_invocation_uses_shell_false_and_timeout(tmp_path, monkeypatch):
     assert scan_quarantined_file(tmp_path / "file.txt") == "clean"
     assert calls["shell"] is False
     assert calls["timeout"] == 30
+
+
+def _receipt(tmp_path, data=b"same-size", user_id=1, workspace_id=2):
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("UPLOAD_SCAN_MODE", "disabled")
+    stored, original, size, status = secure_store_attachment("notes.txt", data, tmp_path / "attachments")
+    monkeypatch.undo()
+    return {
+        "attachment_path": stored,
+        "attachment_original_name": original,
+        "attachment_size": size,
+        "scan_status": status,
+        "fingerprint": content_fingerprint(data),
+        "user_id": user_id,
+        "workspace_id": workspace_id,
+    }
+
+
+def test_same_name_and_size_different_content_does_not_reuse_cached_upload(tmp_path):
+    first = b"12345678"
+    second = b"87654321"
+    receipt = _receipt(tmp_path, first)
+    assert not validate_cached_attachment(receipt, second, filename="notes.txt", user_id=1, workspace_id=2, attachment_dir=tmp_path / "attachments")
+
+
+def test_modified_approved_file_invalidates_cached_receipt(tmp_path):
+    data = b"unchanged"
+    receipt = _receipt(tmp_path, data)
+    (tmp_path / "attachments" / receipt["attachment_path"]).write_bytes(b"modified!")
+    assert not validate_cached_attachment(receipt, data, filename="notes.txt", user_id=1, workspace_id=2, attachment_dir=tmp_path / "attachments")
+
+
+def test_cached_upload_from_another_workspace_is_rejected(tmp_path):
+    data = b"workspace scoped"
+    receipt = _receipt(tmp_path, data, workspace_id=10)
+    assert not validate_cached_attachment(receipt, data, filename="notes.txt", user_id=1, workspace_id=11, attachment_dir=tmp_path / "attachments")
+
+
+def test_matching_content_fingerprint_reuses_unchanged_receipt(tmp_path):
+    data = b"stable content"
+    receipt = _receipt(tmp_path, data)
+    assert validate_cached_attachment(receipt, data, filename="notes.txt", user_id=1, workspace_id=2, attachment_dir=tmp_path / "attachments")
+
+
+def test_evidence_registration_rejects_mismatched_upload_receipt(tmp_path, monkeypatch):
+    import database
+    from upload_security import secure_register_evidence
+    data = b"current content"
+    receipt = _receipt(tmp_path, b"old content")
+    monkeypatch.setattr(database, "get_user_by_id", lambda *args, **kwargs: {"user_id": 1})
+    monkeypatch.setattr(database, "get_workspace", lambda *args, **kwargs: {"owner_user_id": 1})
+    with pytest.raises(UploadSecurityError, match="receipt"):
+        secure_register_evidence({}, {"evidence_title": "x"}, "notes.txt", data, user_id=1, workspace_id=2,
+                                 db_path=tmp_path / "db.sqlite", attachment_dir=tmp_path / "attachments", existing_attachment=receipt)
