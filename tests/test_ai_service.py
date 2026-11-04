@@ -150,6 +150,43 @@ def test_ai_provider_network_and_timeout_fallbacks():
         assert "fallback" in err
 
 
+def test_provider_success_records_safe_usage_metadata(monkeypatch):
+    payload = {"fields": {}, "missing_info": [], "suggested_evidence": []}
+    monkeypatch.setattr("ai_service._call_openai_api", lambda *args, **kwargs: json.dumps(payload))
+    result, error = analyze_startup_idea("A founder description", api_key="test-key", provider="openai")
+    assert error is None
+    assert result.provider_used == "openai"
+    assert result.usage_metadata["provider"] == "openai"
+    assert result.usage_metadata["success"] is True
+    assert "test-key" not in json.dumps(result.usage_metadata)
+
+
+def test_transient_provider_failures_are_retried_then_fallback(monkeypatch):
+    calls = []
+    def fail(*args, **kwargs):
+        calls.append(1)
+        raise TimeoutError("timeout")
+    monkeypatch.setattr("ai_service._call_openai_api", fail)
+    result, error = analyze_startup_idea("A founder description", api_key="test-key", provider="openai")
+    assert result.provider_used == "heuristic"
+    assert "timed out" in error
+    assert len(calls) == 3
+
+
+def test_provider_supporting_excerpt_must_be_grounded(monkeypatch):
+    payload = {"fields": {"startup_name": {"value": "X", "supporting_text": "not in source", "is_inferred": False}}, "missing_info": [], "suggested_evidence": []}
+    monkeypatch.setattr("ai_service._call_openai_api", lambda *args, **kwargs: json.dumps(payload))
+    result, _ = analyze_startup_idea("X is a startup.", api_key="test-key", provider="openai")
+    field = next(item for item in result.fields if item.field_key == "startup_name")
+    assert field.supporting_text == ""
+    assert field.is_inferred is True
+
+
+def test_unexpected_provider_schema_is_rejected():
+    with pytest.raises(ValueError, match="unexpected"):
+        parse_ai_json_response('{"fields": {}, "unexpected": true}')
+
+
 def test_evidence_suggestions_integration_with_db(tmp_path):
     path = tmp_path / "test_ai_evidence.db"
     initialize_database(path)
