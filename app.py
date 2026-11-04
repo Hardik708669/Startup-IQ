@@ -2,6 +2,7 @@
 
 import re
 import logging
+from logging_config import configure_logging
 import uuid
 from datetime import date
 from pathlib import Path
@@ -11,6 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 logger = logging.getLogger(__name__)
+configure_logging()
 
 from intake import split_lines, validate_submission
 from assessment import EVIDENCE_STATUSES, get_dimension_question, reset_assessment_state, validate_assessment_entries
