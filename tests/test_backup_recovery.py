@@ -34,6 +34,35 @@ def _remove_junction(link: Path) -> None:
         link.rmdir()
 
 
+def test_custom_storage_roots_backup_and_staged_restore(tmp_path, monkeypatch):
+    db = tmp_path / "database" / "startup.db"
+    attachments = tmp_path / "separate-attachments"
+    documents = tmp_path / "separate-documents"
+    backups = tmp_path / "separate-backups"
+    initialize_database(db)
+    attachments.mkdir()
+    documents.mkdir()
+    (attachments / "proof.txt").write_text("attachment", encoding="utf-8")
+    nested = documents / "workspace-7"
+    nested.mkdir()
+    (nested / "plan.docx").write_bytes(b"document")
+    backup = create_backup(backups, db_path=db, attachment_dir=attachments, documents_dir=documents, application_stopped=True)
+    manifest = validate_backup(backup)
+    paths = {item["path"] for item in manifest["files"]}
+    assert "data/attachments/proof.txt" in paths
+    assert "data/documents/workspace-7/plan.docx" in paths
+    monkeypatch.setattr(backup_recovery, "_finalize_no_clobber", lambda staging, destination: staging.rename(destination))
+    restored = restore_backup(backup, tmp_path / "staging" / "restored")
+    assert (restored / "data/attachments/proof.txt").read_text(encoding="utf-8") == "attachment"
+    assert (restored / "data/documents/workspace-7/plan.docx").read_bytes() == b"document"
+
+
+def test_default_backup_directory_is_outside_default_data_root():
+    from database import DEFAULT_BACKUP_DIR, DATA_ROOT
+    assert DEFAULT_BACKUP_DIR != DATA_ROOT / "backups"
+    assert DATA_ROOT not in DEFAULT_BACKUP_DIR.parents
+
+
 def _fixture_data(tmp_path: Path):
     data = tmp_path / "data"
     db = data / "startup_iq.db"

@@ -21,7 +21,7 @@ import tempfile
 import uuid
 from typing import Any
 
-from database import DEFAULT_ATTACHMENT_DIR, DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR
+from database import DEFAULT_ATTACHMENT_DIR, DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR
 
 MANIFEST_NAME = "manifest.json"
 MANIFEST_VERSION = 1
@@ -78,6 +78,16 @@ def _ensure_inside(path: Path, root: Path, label: str) -> Path:
     root_resolved = root.resolve()
     if resolved != root_resolved and root_resolved not in resolved.parents:
         raise ValueError(f"{label} must be inside {root_resolved}")
+    return resolved
+
+
+def _safe_storage_root(path: Path, label: str) -> Path:
+    """Validate an independently configured storage root without following links."""
+    if not path.exists() or not path.is_dir() or _is_reparse_point(path):
+        raise ValueError(f"{label} is missing or unsafe.")
+    resolved = path.resolve()
+    if _is_reparse_point(path) or not resolved.is_dir():
+        raise ValueError(f"{label} is unsafe.")
     return resolved
 
 
@@ -224,11 +234,14 @@ def create_backup(
         raise ValueError("Backup requires application_stopped=True; stop Streamlit before backing up files.")
     db = Path(db_path).resolve()
     data_root = db.parent
-    attachments = _ensure_inside(Path(attachment_dir), data_root, "Attachment directory")
-    documents = _ensure_inside(Path(documents_dir), data_root, "Document directory")
+    attachments = _safe_storage_root(Path(attachment_dir), "Attachment directory")
+    documents = _safe_storage_root(Path(documents_dir), "Document directory")
     destination_root = Path(destination).resolve()
-    if destination_root == data_root or data_root in destination_root.parents:
-        raise ValueError("Backup destination must be outside the source data directory.")
+    source_roots = [db.parent.resolve(), attachments, documents]
+    if any(destination_root == root or root in destination_root.parents for root in source_roots):
+        raise ValueError("Backup destination must be outside all configured source storage directories.")
+    if any(root == destination_root or destination_root in root.parents for root in source_roots):
+        raise ValueError("Backup destination cannot overlap configured source storage directories.")
     if not db.exists():
         raise FileNotFoundError(f"Database does not exist: {db}")
     _sqlite_checks(db)
@@ -388,7 +401,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create, verify, and stage-restore Startup IQ backups.")
     sub = parser.add_subparsers(dest="command", required=True)
     backup = sub.add_parser("backup")
-    backup.add_argument("--destination", required=True)
+    backup.add_argument("--destination", default=str(DEFAULT_BACKUP_DIR))
     backup.add_argument("--offline", action="store_true", help="Confirm Streamlit is stopped for file/database consistency.")
     verify = sub.add_parser("verify")
     verify.add_argument("--backup", required=True)
