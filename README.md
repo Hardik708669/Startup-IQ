@@ -163,6 +163,33 @@ For production, set a strong `AUTH_JWT_SECRET`; do not use the development
 fallback. AI provider keys are optional because the local heuristic fallback is
 available.
 
+### AI provider validation
+
+Set `AI_PROVIDER=auto`, `openai`, or `gemini` and provide the matching
+`OPENAI_API_KEY` or `GEMINI_API_KEY` in an untracked `.env` file. Provider
+requests use bounded timeouts and retry only transient rate-limit/server or
+network failures. Authentication, malformed-response, and non-transient
+provider errors fall back to the local heuristic engine with a sanitized error
+category. Provider outputs are parsed against the structured response schema;
+supporting excerpts that do not occur in the supplied founder text are removed.
+
+AI analysis is qualitative only. The deterministic seven-dimension scoring
+engine remains the sole authority for numeric ratings and weights.
+
+To opt into a minimal live smoke test for configured providers:
+
+```powershell
+python ai_provider_smoke_test.py
+```
+
+Providers without keys are reported as skipped. The smoke test never prints
+keys, prompts, responses, or authorization headers. Automated tests use mocked
+provider responses and do not make live API calls. Operational metadata
+(provider, model, outcome, retry count, latency, and sanitized categories) is
+logged without prompts or secrets; deployments should route these logs to
+protected retention infrastructure. Token usage is only available when a
+provider response exposes it and is not inferred.
+
 Authentication sessions are stored in SQLite by opaque JWT `jti` metadata; raw
 tokens are never stored. Logout revokes only the current session, while expired
 session records can be safely cleaned up. Tokens without a registered session

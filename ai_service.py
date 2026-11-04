@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Mapping
 import urllib.error
 import urllib.request
@@ -19,6 +20,7 @@ import urllib.request
 from config import AI_API_KEY
 
 logger = logging.getLogger(__name__)
+_last_provider_usage: dict[str, int] = {}
 
 # Constants for extraction statuses
 STATUS_PENDING = "Pending review"
@@ -118,6 +120,7 @@ class AnalysisResult:
     suggested_evidence: list[SuggestedEvidence] = field(default_factory=list)
     raw_response: str = ""
     provider_used: str = "heuristic"
+    usage_metadata: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -125,6 +128,7 @@ class AnalysisResult:
             "missing_info": [m.as_dict() for m in self.missing_info],
             "suggested_evidence": [e.as_dict() for e in self.suggested_evidence],
             "provider_used": self.provider_used,
+            "usage_metadata": self.usage_metadata,
         }
 
 
@@ -199,6 +203,48 @@ def _clean_json_markdown(text: str) -> str:
         text = re.sub(r"^```[a-zA-Z]*\n", "", text)
         text = re.sub(r"\n```$", "", text)
     return text.strip()
+
+
+def _invoke_provider(callable_, *, provider: str, model: str, timeout: int) -> tuple[str, dict[str, Any]]:
+    """Invoke a provider with a small retry budget for transient failures only."""
+    started = time.perf_counter()
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            global _last_provider_usage
+            _last_provider_usage = {}
+            raw = callable_(timeout=timeout)
+            metadata = {"provider": provider, "model": model, "success": True,
+                        "attempts": attempts, "latency_ms": round((time.perf_counter() - started) * 1000, 1)}
+            if _last_provider_usage:
+                metadata["token_usage"] = dict(_last_provider_usage)
+            logger.info("ai_request_completed", extra={"ai_event": metadata})
+            return raw, metadata
+        except urllib.error.HTTPError as error:
+            transient = error.code == 429 or 500 <= error.code < 600
+            if transient and attempts < 3:
+                time.sleep(0.2 * attempts)
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempts < 3:
+                time.sleep(0.2 * attempts)
+                continue
+            raise
+
+
+def _ground_analysis(result: AnalysisResult, source_text: str) -> AnalysisResult:
+    """Remove supporting excerpts that are not present in the supplied source."""
+    for field_item in result.fields:
+        if field_item.supporting_text and field_item.supporting_text not in source_text:
+            field_item.supporting_text = ""
+            field_item.is_inferred = True
+    for claim in result.suggested_evidence:
+        if claim.supporting_excerpt and claim.supporting_excerpt not in source_text:
+            claim.supporting_excerpt = ""
+            claim.is_approved = False
+    return result
 
 
 def heuristic_extract_startup_idea(text: str) -> AnalysisResult:
@@ -444,6 +490,9 @@ def _call_openai_api(api_key: str, text: str, model: str = "gpt-4o-mini", timeou
     )
     with urllib.request.urlopen(req, timeout=timeout) as response:
         res_data = json.loads(response.read().decode("utf-8"))
+        global _last_provider_usage
+        usage = res_data.get("usage", {})
+        _last_provider_usage = {key: int(usage[key]) for key in ("prompt_tokens", "completion_tokens", "total_tokens") if isinstance(usage.get(key), int)}
         return res_data["choices"][0]["message"]["content"]
 
 
@@ -472,6 +521,9 @@ def _call_gemini_api(api_key: str, text: str, model: str = "gemini-3.8-flash", t
     )
     with urllib.request.urlopen(req, timeout=timeout) as response:
         res_data = json.loads(response.read().decode("utf-8"))
+        global _last_provider_usage
+        usage = res_data.get("usageMetadata", {})
+        _last_provider_usage = {key: int(usage[key]) for key in ("promptTokenCount", "candidatesTokenCount", "totalTokenCount") if isinstance(usage.get(key), int)}
         return res_data["candidates"][0]["content"]["parts"][0]["text"]
 
 
@@ -483,6 +535,10 @@ def parse_ai_json_response(json_str: str, provider_name: str = "llm") -> Analysi
         raise ValueError("AI response is not a valid JSON dictionary.")
 
     raw_fields = parsed.get("fields", {})
+    if not isinstance(raw_fields, dict):
+        raise ValueError("AI fields must be a JSON object.")
+    if set(parsed) - {"fields", "missing_info", "suggested_evidence"}:
+        raise ValueError("AI response contains unexpected top-level fields.")
     fields_list: list[ExtractedField] = []
     for f_key, label, sec, target_pk in FIELD_DEFINITIONS:
         f_info = raw_fields.get(f_key, {})
@@ -491,6 +547,8 @@ def parse_ai_json_response(json_str: str, provider_name: str = "llm") -> Analysi
             supp = str(f_info.get("supporting_text", "")).strip()
             inferred = bool(f_info.get("is_inferred", False))
             conf = float(f_info.get("confidence", 0.8 if val else 0.3))
+            if not 0 <= conf <= 1:
+                raise ValueError("AI confidence is outside the permitted range.")
         else:
             val = str(f_info).strip()
             supp = ""
@@ -576,11 +634,15 @@ def analyze_startup_idea(
     # Call configured provider
     try:
         if active_provider == "gemini" or (active_provider == "auto" and active_key.startswith("AIza")):
-            raw_json = _call_gemini_api(active_key, clean_text, timeout=timeout)
-            return parse_ai_json_response(raw_json, provider_name="gemini"), None
+            raw_json, metadata = _invoke_provider(lambda **kw: _call_gemini_api(active_key, clean_text, **kw), provider="gemini", model="gemini-3.8-flash", timeout=timeout)
+            result = _ground_analysis(parse_ai_json_response(raw_json, provider_name="gemini"), clean_text)
+            result.usage_metadata = metadata
+            return result, None
         else:
-            raw_json = _call_openai_api(active_key, clean_text, timeout=timeout)
-            return parse_ai_json_response(raw_json, provider_name="openai"), None
+            raw_json, metadata = _invoke_provider(lambda **kw: _call_openai_api(active_key, clean_text, **kw), provider="openai", model="gpt-4o-mini", timeout=timeout)
+            result = _ground_analysis(parse_ai_json_response(raw_json, provider_name="openai"), clean_text)
+            result.usage_metadata = metadata
+            return result, None
     except urllib.error.HTTPError as error:
         err_msg = f"AI Provider HTTP {error.code}: {error.reason}"
         logger.warning(f"{err_msg}; falling back to heuristic engine.")
@@ -635,6 +697,7 @@ class DocumentAnalysisResult:
     document_summary: str = ""
     provider_used: str = "heuristic"
     error: str | None = None
+    usage_metadata: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -644,6 +707,7 @@ class DocumentAnalysisResult:
             "document_summary": self.document_summary,
             "provider_used": self.provider_used,
             "error": self.error,
+            "usage_metadata": self.usage_metadata,
         }
 
 
@@ -719,11 +783,17 @@ Document Text:
 
     try:
         if active_provider == "gemini" or (active_provider == "auto" and active_key.startswith("AIza")):
-            raw_json = _call_gemini_api(active_key, prompt, timeout=timeout)
+            raw_json, metadata = _invoke_provider(lambda **kw: _call_gemini_api(active_key, prompt, **kw), provider="gemini", model="gemini-3.8-flash", timeout=timeout)
         else:
-            raw_json = _call_openai_api(active_key, prompt, timeout=timeout)
+            raw_json, metadata = _invoke_provider(lambda **kw: _call_openai_api(active_key, prompt, **kw), provider="openai", model="gpt-4o-mini", timeout=timeout)
 
-        return parse_document_analysis_json(raw_json, source_filename, provider_name=active_provider)
+        result = parse_document_analysis_json(raw_json, source_filename, provider_name=active_provider)
+        result.usage_metadata = metadata
+        for claim in result.claims:
+            if claim.supporting_excerpt and claim.supporting_excerpt not in clean_text:
+                claim.supporting_excerpt = ""
+                claim.is_directly_stated = False
+        return result
     except Exception as exc:
         logger.warning(f"AI Document analysis API failed: {exc}; falling back to heuristic analyzer.")
         fallback_res = heuristic_analyze_document(clean_text, source_filename, startup_profile=startup_profile)
@@ -742,6 +812,8 @@ def parse_document_analysis_json(raw_json: str, source_filename: str, provider_n
         # Fallback to heuristic if JSON is broken
         return heuristic_analyze_document(raw_json, source_filename)
 
+    if not isinstance(data, dict) or not isinstance(data.get("claims", []), list) or not isinstance(data.get("missing_evidence_gaps", []), list):
+        raise ValueError("AI document response has an invalid schema.")
     claims: list[DocumentEvidenceClaim] = []
     for c in data.get("claims", []):
         if c.get("claim_title") and c.get("claim_description"):
