@@ -3,6 +3,8 @@
 from pathlib import Path
 
 import pytest
+import io
+import zipfile
 
 from database import (
     EVIDENCE_TYPES, VERIFICATION_STATUSES, archive_evidence, ensure_startup,
@@ -155,8 +157,11 @@ def test_attachment_access_is_scoped_to_the_owner_and_workspace(tmp_path):
     workspace_a = create_workspace(user_a, "A Workspace", path=path)
     workspace_b = create_workspace(user_b, "B Workspace", path=path)
     profile_a = profile("Private Attachment Co")
+    docx_bytes = io.BytesIO()
+    with zipfile.ZipFile(docx_bytes, "w") as archive:
+        archive.writestr("word/document.xml", "USER-A-PRIVATE-CONTENT")
     attachment_name, original_name, size = store_attachment(
-        "private-proof.docx", b"USER-A-PRIVATE-CONTENT", attachment_dir
+        "private-proof.docx", docx_bytes.getvalue(), attachment_dir
     )
     evidence_id = save_evidence(
         profile_a,
@@ -175,7 +180,7 @@ def test_attachment_access_is_scoped_to_the_owner_and_workspace(tmp_path):
     # trusted storage location used by the application.
     owner_record = get_evidence(evidence_id, path, user_id=user_a)
     assert owner_record is not None
-    assert (attachment_dir / owner_record["attachment_path"]).read_bytes() == b"USER-A-PRIVATE-CONTENT"
+    assert b"USER-A-PRIVATE-CONTENT" in (attachment_dir / owner_record["attachment_path"]).read_bytes()
 
     # A different user cannot resolve the evidence by ID, even when they know
     # the identifier and the other user's workspace exists.

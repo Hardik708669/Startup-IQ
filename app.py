@@ -23,6 +23,7 @@ from ai_service import (
     analyze_startup_idea, analyze_extracted_document, DocumentAnalysisResult, DocumentEvidenceClaim,
 )
 from document_extractor import extract_document_text, ExtractionResult
+from upload_security import secure_store_attachment, secure_register_evidence, remove_approved_attachment, UploadSecurityError, validate_upload
 from business_plan_generator import (
     BUSINESS_PLAN_SECTIONS, create_business_plan_docx, draft_business_plan_content,
 )
@@ -32,7 +33,7 @@ from pitch_deck_generator import (
 from database import (DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR, EVIDENCE_TYPES, VERIFICATION_STATUSES,
                        archive_evidence, ensure_startup, get_assessment, get_generated_document,
                        initialize_database, list_evidence, list_assessments, list_generated_documents,
-                       save_assessment, save_evidence, save_generated_document, store_attachment,
+                       save_assessment, save_evidence, save_generated_document,
                        update_evidence, create_user, get_user_by_email, get_user_by_id,
                        update_user_last_login, create_workspace, list_user_workspaces,
                        get_workspace, update_workspace, archive_workspace, bootstrap_legacy_ownership,
@@ -553,6 +554,14 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
             c_meta1.caption(f"**Filename:** {doc_upload.name}")
             c_meta2.caption(f"**Size:** {len(doc_upload.getvalue()) // 1024} KB")
             c_meta3.caption(f"**Format:** {Path(doc_upload.name).suffix.upper()}")
+            try:
+                validate_upload(doc_upload.getvalue(), doc_upload.name)
+                secure_key = f"secure_upload_{doc_upload.name}_{len(doc_upload.getvalue())}"
+                if secure_key not in st.session_state:
+                    st.session_state[secure_key] = secure_store_attachment(doc_upload.name, doc_upload.getvalue(), user_id=_uid, workspace_id=_wsid, db_path=DEFAULT_DB_PATH)
+            except UploadSecurityError as error:
+                st.error(str(error))
+                st.stop()
 
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
@@ -616,24 +625,30 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
                                     # Also store the uploaded attachment if not yet stored
                                     att_info = {}
                                     try:
-                                        stored, orig, sz = store_attachment(doc_upload.name, doc_upload.getvalue())
+                                        stored, orig, sz, _ = st.session_state[secure_key]
                                         att_info = {"attachment_path": stored, "attachment_original_name": orig, "attachment_size": sz}
                                     except Exception:
                                         pass
 
-                                    save_evidence(profile, {
-                                        "evidence_title": claim.claim_title,
-                                        "evidence_description": claim.claim_description,
-                                        "supporting_excerpt": claim.supporting_excerpt,
-                                        "evidence_type": claim.evidence_type,
-                                        "related_dimension": claim.related_dimension,
-                                        "source_name": doc_upload.name,
-                                        "source_url": "",
-                                        "source_date": date.today().isoformat(),
-                                        "verification_status": "Founder submitted",
-                                        "founder_notes": f"Extracted via {cur_analysis.provider_used} document analysis. {claim.recommended_verification}.",
-                                        **att_info,
-                                    }, workspace_id=workspace_id, user_id=user_id)
+                                    try:
+                                        secure_register_evidence(profile, {
+                                            "evidence_title": claim.claim_title,
+                                            "evidence_description": claim.claim_description,
+                                            "supporting_excerpt": claim.supporting_excerpt,
+                                            "evidence_type": claim.evidence_type,
+                                            "related_dimension": claim.related_dimension,
+                                            "source_name": doc_upload.name,
+                                            "source_url": "",
+                                            "source_date": date.today().isoformat(),
+                                            "verification_status": "Founder submitted",
+                                            "founder_notes": f"Extracted via {cur_analysis.provider_used} document analysis. {claim.recommended_verification}.",
+                                            **att_info,
+                                        }, doc_upload.name, doc_upload.getvalue(), user_id=user_id, workspace_id=workspace_id, db_path=DEFAULT_DB_PATH, existing_attachment=(att_info["attachment_path"], att_info["attachment_original_name"], att_info["attachment_size"]))
+                                    except Exception:
+                                        if att_info.get("attachment_path"):
+                                            remove_approved_attachment(att_info["attachment_path"])
+                                        st.error("The evidence could not be registered.")
+                                        continue
                                     claim.approval_status = STATUS_APPROVED
                                     st.success(f"Registered claim #{c_idx + 1} into Evidence Registry!")
                                     st.rerun()
@@ -679,21 +694,27 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
             elif not title.strip() or not description.strip():
                 st.error("Evidence title and description are required.")
             else:
-                attachment_data = {}
                 try:
                     if attachment is not None:
-                        stored, original, size = store_attachment(attachment.name, attachment.getvalue())
-                        attachment_data = {"attachment_path": stored, "attachment_original_name": original, "attachment_size": size}
-                    evidence_id = save_evidence(profile, {
-                        "evidence_title": title, "evidence_description": description, "evidence_type": selected_type,
-                        "related_dimension": dimension, "source_name": source_name, "source_url": source_url,
-                        "source_date": source_date.isoformat() if source_date else "", "verification_status": verification,
-                        "founder_notes": notes, **attachment_data,
-                    }, workspace_id=workspace_id, user_id=user_id)
+                        evidence_id = secure_register_evidence(profile, {
+                            "evidence_title": title, "evidence_description": description, "evidence_type": selected_type,
+                            "related_dimension": dimension, "source_name": source_name, "source_url": source_url,
+                            "source_date": source_date.isoformat() if source_date else "", "verification_status": verification,
+                            "founder_notes": notes,
+                        }, attachment.name, attachment.getvalue(), user_id=user_id, workspace_id=workspace_id, db_path=DEFAULT_DB_PATH)
+                    else:
+                        evidence_id = save_evidence(profile, {
+                            "evidence_title": title, "evidence_description": description, "evidence_type": selected_type,
+                            "related_dimension": dimension, "source_name": source_name, "source_url": source_url,
+                            "source_date": source_date.isoformat() if source_date else "", "verification_status": verification,
+                            "founder_notes": notes,
+                        }, workspace_id=workspace_id, user_id=user_id)
                     st.success(f"Evidence registered ({evidence_id}).")
                     st.rerun()
-                except Exception as error:
-                    st.error(f"Evidence could not be registered: {error}")
+                except UploadSecurityError as error:
+                    st.error(str(error))
+                except Exception:
+                    st.error("Evidence could not be registered.")
 
     records = list_evidence(profile, workspace_id=workspace_id, user_id=user_id)
     filter_cols = st.columns(4)
