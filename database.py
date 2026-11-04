@@ -25,9 +25,16 @@ from recommendations import Recommendation
 from scoring import AssessmentResult, DimensionScore
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "startup_iq.db"
-DEFAULT_ATTACHMENT_DIR = PROJECT_ROOT / "data" / "attachments"
-DEFAULT_DOCUMENTS_DIR = PROJECT_ROOT / "data" / "documents"
+DATA_ROOT = Path(os.getenv("STARTUP_IQ_DATA_DIR", str(PROJECT_ROOT / "data")))
+def _configured_path(name: str, default: Path) -> Path:
+    value = os.getenv(name, "").strip()
+    return Path(value) if value else default
+
+DEFAULT_DB_PATH = _configured_path("STARTUP_IQ_DB_PATH", DATA_ROOT / "startup_iq.db")
+DEFAULT_ATTACHMENT_DIR = _configured_path("STARTUP_IQ_ATTACHMENTS_DIR", DATA_ROOT / "attachments")
+DEFAULT_QUARANTINE_DIR = _configured_path("STARTUP_IQ_QUARANTINE_DIR", DATA_ROOT / "quarantine")
+DEFAULT_DOCUMENTS_DIR = _configured_path("STARTUP_IQ_DOCUMENTS_DIR", DATA_ROOT / "documents")
+DEFAULT_BACKUP_DIR = _configured_path("STARTUP_IQ_BACKUPS_DIR", PROJECT_ROOT / "backups")
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 ALLOWED_ATTACHMENT_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".png", ".jpg", ".jpeg"}
 EVIDENCE_TYPES = (
@@ -194,6 +201,11 @@ CREATE TABLE IF NOT EXISTS audit_events (
     reason_category TEXT,
     correlation_id TEXT
 );
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
 """
 
 SCHEMA_INDEXES = """
@@ -223,6 +235,8 @@ def get_connection(path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 5000")
+    connection.execute("PRAGMA journal_mode = WAL")
     return connection
 
 
@@ -283,7 +297,14 @@ def initialize_database(path: str | Path = DEFAULT_DB_PATH) -> Path:
         connection.executescript(SCHEMA_TABLES)
         _migrate_existing_schema(connection)
         connection.executescript(SCHEMA_INDEXES)
+        connection.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)", (1, datetime.now(timezone.utc).isoformat()))
     return database_path
+
+
+def applied_migration_versions(path: str | Path = DEFAULT_DB_PATH) -> list[int]:
+    initialize_database(path)
+    with get_connection(path) as connection:
+        return [int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")]
 
 
 # ---------------------------------------------------------------------------

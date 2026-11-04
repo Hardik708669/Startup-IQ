@@ -5,7 +5,7 @@ import argparse
 import sqlite3
 from pathlib import Path
 
-from database import DEFAULT_ATTACHMENT_DIR, DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR, initialize_database
+from database import DEFAULT_ATTACHMENT_DIR, DEFAULT_BACKUP_DIR, DEFAULT_DB_PATH, DEFAULT_DOCUMENTS_DIR, applied_migration_versions, initialize_database
 from logging_config import configure_logging
 
 
@@ -15,9 +15,10 @@ def run_diagnostics(db_path=DEFAULT_DB_PATH) -> dict[str, str]:
         initialize_database(db_path)
         with sqlite3.connect(db_path) as connection:
             result["sqlite"] = connection.execute("PRAGMA integrity_check").fetchone()[0]
+        result["migrations"] = ",".join(map(str, applied_migration_versions(db_path))) or "none"
     except Exception:
         result["sqlite"] = "error"
-    for name, path in (("attachments", DEFAULT_ATTACHMENT_DIR), ("documents", DEFAULT_DOCUMENTS_DIR)):
+    for name, path in (("attachments", DEFAULT_ATTACHMENT_DIR), ("documents", DEFAULT_DOCUMENTS_DIR), ("backups", DEFAULT_BACKUP_DIR)):
         try:
             Path(path).mkdir(parents=True, exist_ok=True)
             probe = Path(path) / ".startup_iq_write_probe"

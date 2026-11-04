@@ -277,7 +277,12 @@ Copy `.env.example` to `.env` only when optional future AI configuration is need
 ## Backup and recovery
 
 Startup IQ stores its SQLite database in `data/startup_iq.db`, uploaded attachments
-in `data/attachments/`, and generated DOCX/PPTX files in `data/documents/`.
+in `data/attachments/`, quarantine files in `data/quarantine/`, and generated
+DOCX/PPTX files in `data/documents/`. The default backup destination is the
+separate project-level `backups/` directory, outside the source data directory.
+These locations can be changed with `STARTUP_IQ_DB_PATH`,
+`STARTUP_IQ_ATTACHMENTS_DIR`, `STARTUP_IQ_QUARANTINE_DIR`,
+`STARTUP_IQ_DOCUMENTS_DIR`, and `STARTUP_IQ_BACKUPS_DIR`.
 Backups contain sensitive founder, startup, evidence, and generated-document data;
 store them encrypted and restrict access appropriately. Do not place a backup inside
 the project's `data/` directory or commit one to Git.
@@ -289,6 +294,7 @@ outside the project data directory:
 Replace `BACKUP_ID` with the directory name printed by the backup command:
 
 ```powershell
+python backup_recovery.py backup --offline
 python backup_recovery.py backup --destination C:\Startup-IQ-Backups --offline
 python backup_recovery.py verify --backup C:\Startup-IQ-Backups\BACKUP_DIRECTORY
 python backup_recovery.py restore --backup C:\Startup-IQ-Backups\BACKUP_DIRECTORY --target C:\Startup-IQ-Recovery\staging
@@ -311,8 +317,10 @@ deliberately activating any recovered dataset through a separate procedure.
 The unsigned manifest's SHA-256 checksums detect accidental corruption when the
 manifest is trusted; they do not authenticate a backup against an attacker who can
 modify both files and the manifest. Use a separately protected signature or
-checksum for authenticity. The CLI currently uses the configured default paths
-from `database.py` and does not expose custom storage-path options. Legacy migration
+checksum for authenticity. The CLI uses the configured default database,
+attachment, and document paths from `database.py`; `--destination` overrides the
+backup destination. Independently configured storage roots are archived using the
+stable `data/attachments` and `data/documents` layout. Legacy migration
 backup files are not part of the active backup unless explicitly included by a
 future implementation.
 

@@ -12,7 +12,7 @@ import tempfile
 import uuid
 import zipfile
 
-from database import DEFAULT_ATTACHMENT_DIR, MAX_ATTACHMENT_BYTES, record_upload_security_event
+from database import DEFAULT_ATTACHMENT_DIR, DEFAULT_QUARANTINE_DIR, MAX_ATTACHMENT_BYTES, record_upload_security_event
 
 logger = logging.getLogger(__name__)
 
@@ -141,11 +141,12 @@ def scan_quarantined_file(path: Path) -> str:
     raise UploadSecurityError("Malware scanner failed.")
 
 
-def secure_store_attachment(filename: str, data: bytes, attachment_dir: str | Path = DEFAULT_ATTACHMENT_DIR, *, user_id: int | None = None, workspace_id: int | None = None, db_path: str | Path | None = None) -> tuple[str, str, int, str]:
+def secure_store_attachment(filename: str, data: bytes, attachment_dir: str | Path = DEFAULT_ATTACHMENT_DIR, *, user_id: int | None = None, workspace_id: int | None = None, db_path: str | Path | None = None, quarantine_dir: str | Path | None = None) -> tuple[str, str, int, str]:
     """Validate, quarantine, scan, and atomically promote an upload."""
     suffix = validate_upload(data, filename)
     root = _prepare_directory(attachment_dir)
-    quarantine = _prepare_directory(root.parent / "quarantine")
+    quarantine_path = quarantine_dir if quarantine_dir is not None else (DEFAULT_QUARANTINE_DIR if Path(attachment_dir) == Path(DEFAULT_ATTACHMENT_DIR) else Path(attachment_dir).parent / "quarantine")
+    quarantine = _prepare_directory(quarantine_path)
     internal = f"{uuid.uuid4().hex}{suffix}"
     quarantined = quarantine / internal
     approved = root / internal
