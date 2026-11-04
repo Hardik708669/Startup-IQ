@@ -182,6 +182,18 @@ CREATE TABLE IF NOT EXISTS upload_security_events (
     reason_category TEXT,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    user_id INTEGER,
+    workspace_id INTEGER,
+    reason_category TEXT,
+    correlation_id TEXT
+);
 """
 
 SCHEMA_INDEXES = """
@@ -198,6 +210,7 @@ CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expi
 CREATE INDEX IF NOT EXISTS idx_login_attempts_lock ON login_attempts(locked_until);
 CREATE INDEX IF NOT EXISTS idx_login_reservations_identifier ON login_attempt_reservations(identifier, expires_at);
 CREATE INDEX IF NOT EXISTS idx_upload_security_owner ON upload_security_events(user_id, workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at);
 """
 
 SCHEMA = SCHEMA_TABLES + SCHEMA_INDEXES
@@ -885,6 +898,29 @@ def record_upload_security_event(upload_id: str, file_type: str, file_size: int,
             "INSERT INTO upload_security_events(upload_id, user_id, workspace_id, file_type, file_size, scan_status, scanner_name, reason_category, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (upload_id, user_id, workspace_id, file_type, int(file_size), scan_status, scanner_name, str(reason_category)[:80] if reason_category else None, now),
         )
+
+
+def record_audit_event(event_type: str, *, severity: str = "INFO", outcome: str = "success", user_id: int | None = None, workspace_id: int | None = None, reason_category: str | None = None, correlation_id: str | None = None, path: str | Path = DEFAULT_DB_PATH) -> None:
+    """Persist minimal operational metadata; callers should treat failures as non-fatal."""
+    initialize_database(path)
+    allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    if severity.upper() not in allowed:
+        raise ValueError("Invalid audit severity.")
+    with get_connection(path) as connection:
+        connection.execute(
+            "INSERT INTO audit_events(event_type, created_at, severity, outcome, user_id, workspace_id, reason_category, correlation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (str(event_type)[:80], datetime.now(timezone.utc).isoformat(), severity.upper(), str(outcome)[:40], user_id, workspace_id, str(reason_category)[:80] if reason_category else None, str(correlation_id)[:80] if correlation_id else None),
+        )
+
+
+def cleanup_audit_events(*, retention_days: int = 90, path: str | Path = DEFAULT_DB_PATH) -> int:
+    if retention_days < 1:
+        raise ValueError("Retention must be positive.")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+    initialize_database(path)
+    with get_connection(path) as connection:
+        cursor = connection.execute("DELETE FROM audit_events WHERE created_at < ?", (cutoff,))
+        return cursor.rowcount
 
 
 def store_attachment(filename: str, data: bytes, attachment_dir: str | Path = DEFAULT_ATTACHMENT_DIR, *, db_path: str | Path, user_id: int, workspace_id: int) -> tuple[str, str, int]:

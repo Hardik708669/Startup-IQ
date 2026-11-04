@@ -204,6 +204,18 @@ tokens, secrets, and document contents are never logged.
 The defaults can be configured with `AUTH_LOGIN_MAX_ATTEMPTS`,
 `AUTH_LOGIN_WINDOW_SECONDS`, and `AUTH_LOGIN_COOLDOWN_SECONDS`.
 
+### Logging and diagnostics
+
+Logging is configured through `LOG_LEVEL`, optional rotating `LOG_FILE`,
+`LOG_MAX_BYTES`, and `LOG_BACKUP_COUNT`. Configuration is rerun-safe for
+Streamlit. Messages use allowlisted metadata and redact common password, API
+key, and bearer-token patterns; prompts, responses, uploaded contents, and
+secrets are not recorded. `audit_events` stores minimal operational metadata
+when explicitly written by an operator or integration. Run `python
+diagnostics.py diagnose` for a safe SQLite, storage-writability, and logging
+check. Audit retention is operator-controlled with `AUDIT_RETENTION_DAYS` and
+does not remove backups, documents, attachments, or application records.
+
 ### Upload security
 
 Supported uploads are PDF, DOCX, XLSX, CSV, TXT, PNG, JPG, and JPEG. Uploads
