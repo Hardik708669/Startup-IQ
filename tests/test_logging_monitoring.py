@@ -6,11 +6,37 @@ from logging_config import configure_logging, sanitize
 
 
 def test_logging_configuration_is_rerun_safe(tmp_path):
-    logger = configure_logging(level="WARNING", log_file=tmp_path / "startup.log")
-    count = len(logger.handlers)
     configure_logging(level="WARNING", log_file=tmp_path / "startup.log")
-    assert len(logger.handlers) == count
-    assert logger.level == logging.WARNING
+    module_logger = logging.getLogger("app")
+    count = len(logging.getLogger().handlers)
+    configure_logging(level="WARNING", log_file=tmp_path / "startup.log")
+    assert len(logging.getLogger().handlers) == count
+    assert logging.getLogger().level == logging.WARNING
+
+
+def test_module_logger_routes_to_file_and_redacts_secrets(tmp_path):
+    path = tmp_path / "application.log"
+    configure_logging(level="INFO", log_file=path)
+    logging.getLogger("app").info("request password=secret API_KEY=hidden")
+    text = path.read_text(encoding="utf-8")
+    assert "request" in text
+    assert "secret" not in text
+    assert "hidden" not in text
+
+
+def test_repeated_configuration_does_not_duplicate_module_entries(tmp_path):
+    path = tmp_path / "duplicate.log"
+    configure_logging(level="INFO", log_file=path)
+    configure_logging(level="INFO", log_file=path)
+    logging.getLogger("database").info("single-event")
+    assert path.read_text(encoding="utf-8").count("single-event") == 1
+
+
+def test_third_party_logger_is_not_captured(tmp_path):
+    path = tmp_path / "filtered.log"
+    configure_logging(level="INFO", log_file=path)
+    logging.getLogger("urllib3").info("third-party-event")
+    assert "third-party-event" not in path.read_text(encoding="utf-8")
 
 
 def test_secret_sanitization():
