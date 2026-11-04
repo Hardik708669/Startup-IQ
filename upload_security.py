@@ -201,7 +201,12 @@ def validate_cached_attachment(receipt: dict, data: bytes, *, filename: str,
         return False
     if receipt.get("user_id") != user_id or receipt.get("workspace_id") != workspace_id:
         return False
-    if receipt.get("scan_status") not in {"clean", "skipped"}:
+    scan_mode = os.getenv("UPLOAD_SCAN_MODE", "disabled").strip().lower()
+    app_env = os.getenv("APP_ENV", "development").strip().lower()
+    receipt_status = receipt.get("scan_status")
+    if receipt_status not in {"clean", "skipped"}:
+        return False
+    if (app_env == "production" or scan_mode == "required") and receipt_status != "clean":
         return False
     try:
         validate_upload(data, filename)

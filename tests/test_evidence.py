@@ -72,7 +72,7 @@ def test_evidence_validation_types_and_statuses(tmp_path):
 def test_attachment_validation_and_safe_storage(tmp_path):
     with pytest.raises(ValueError): validate_attachment("../../evil.exe", 1)
     with pytest.raises(ValueError): validate_attachment("large.txt", 11, max_bytes=10)
-    stored, original, size = store_attachment("../../notes.txt", b"safe", tmp_path / "private")
+    stored, original, size = store_attachment("../../notes.txt", b"safe", tmp_path / "private", db_path=tmp_path / "db.sqlite", user_id=1, workspace_id=1)
     assert stored == f"{stored.split('.')[0]}.txt"
     assert original == "notes.txt"
     assert size == 4
@@ -141,7 +141,7 @@ def test_attachment_security_and_edge_cases(tmp_path):
         
     # Path traversal protection
     private_dir = tmp_path / "private_attachments"
-    stored_name, orig_name, size = store_attachment("..\\..\\secret.pdf", b"%PDF-dummy", private_dir)
+    stored_name, orig_name, size = store_attachment("..\\..\\secret.pdf", b"%PDF-dummy", private_dir, db_path=tmp_path / "db.sqlite", user_id=1, workspace_id=1)
     assert orig_name == "secret.pdf"
     assert not stored_name.startswith("..")
     assert (private_dir / stored_name).exists()
@@ -161,7 +161,8 @@ def test_attachment_access_is_scoped_to_the_owner_and_workspace(tmp_path):
     with zipfile.ZipFile(docx_bytes, "w") as archive:
         archive.writestr("word/document.xml", "USER-A-PRIVATE-CONTENT")
     attachment_name, original_name, size = store_attachment(
-        "private-proof.docx", docx_bytes.getvalue(), attachment_dir
+        "private-proof.docx", docx_bytes.getvalue(), attachment_dir,
+        db_path=path, user_id=user_a, workspace_id=workspace_a
     )
     evidence_id = save_evidence(
         profile_a,
@@ -191,7 +192,7 @@ def test_attachment_access_is_scoped_to_the_owner_and_workspace(tmp_path):
     # The original filename and traversal-like names never become a storage
     # path; missing files also fail closed at the storage layer.
     assert Path(attachment_name).name == attachment_name
-    traversal_name, _, _ = store_attachment("..\\..\\outside.txt", b"safe", attachment_dir)
+    traversal_name, _, _ = store_attachment("..\\..\\outside.txt", b"safe", attachment_dir, db_path=path, user_id=user_a, workspace_id=workspace_a)
     assert (attachment_dir / traversal_name).resolve().parent == attachment_dir.resolve()
     missing_path = attachment_dir / "does-not-exist.docx"
     assert not missing_path.exists()

@@ -109,7 +109,24 @@ def test_symlinked_storage_roots_are_rejected_without_touching_target(tmp_path, 
 def test_legacy_store_attachment_uses_signature_validation(tmp_path):
     from database import store_attachment
     with pytest.raises(ValueError):
-        store_attachment("fake.pdf", b"MZ executable", tmp_path / "attachments")
+        store_attachment("fake.pdf", b"MZ executable", tmp_path / "attachments", db_path=tmp_path / "db.sqlite", user_id=1, workspace_id=1)
+
+
+def test_legacy_store_attachment_requires_persistence_context(tmp_path):
+    from database import store_attachment
+    with pytest.raises(TypeError):
+        store_attachment("notes.txt", b"safe", tmp_path / "attachments")
+
+
+def test_legacy_store_attachment_persists_scan_outcome(tmp_path, monkeypatch):
+    from database import store_attachment
+    import sqlite3
+    monkeypatch.setenv("UPLOAD_SCAN_MODE", "disabled")
+    db = tmp_path / "uploads.db"
+    stored, _, _ = store_attachment("notes.txt", b"safe", tmp_path / "attachments", db_path=db, user_id=7, workspace_id=8)
+    assert (tmp_path / "attachments" / stored).exists()
+    with sqlite3.connect(db) as connection:
+        assert connection.execute("SELECT user_id, workspace_id, scan_status FROM upload_security_events").fetchone() == (7, 8, "skipped")
 
 
 def test_backup_excludes_quarantine_and_includes_approved_attachment(tmp_path, monkeypatch):
@@ -153,6 +170,20 @@ def test_secure_registration_cleanup_failure_is_logged_without_hiding_error(tmp_
         with pytest.raises(RuntimeError, match="registration sentinel"):
             upload_security.secure_register_evidence({}, {"evidence_title": "x"}, "x.txt", b"content", user_id=1, workspace_id=1, db_path=tmp_path / "db.sqlite", attachment_dir=tmp_path / "attachments")
     assert "Approved attachment cleanup failed" in caplog.text
+
+
+def test_secure_registration_attempts_cleanup_once(tmp_path, monkeypatch):
+    import database
+    import upload_security
+    monkeypatch.setenv("UPLOAD_SCAN_MODE", "disabled")
+    monkeypatch.setattr(database, "get_user_by_id", lambda *args, **kwargs: {"user_id": 1})
+    monkeypatch.setattr(database, "get_workspace", lambda *args, **kwargs: {"owner_user_id": 1})
+    monkeypatch.setattr(database, "save_evidence", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("registration sentinel")))
+    calls = []
+    monkeypatch.setattr(upload_security, "remove_approved_attachment", lambda *args, **kwargs: calls.append(args[0]))
+    with pytest.raises(RuntimeError, match="registration sentinel"):
+        upload_security.secure_register_evidence({}, {"evidence_title": "x"}, "x.txt", b"content", user_id=1, workspace_id=1, db_path=tmp_path / "db.sqlite", attachment_dir=tmp_path / "attachments")
+    assert len(calls) == 1
 
 
 def test_clamav_invocation_uses_shell_false_and_timeout(tmp_path, monkeypatch):
@@ -207,6 +238,29 @@ def test_matching_content_fingerprint_reuses_unchanged_receipt(tmp_path):
     data = b"stable content"
     receipt = _receipt(tmp_path, data)
     assert validate_cached_attachment(receipt, data, filename="notes.txt", user_id=1, workspace_id=2, attachment_dir=tmp_path / "attachments")
+
+
+def test_skipped_receipt_is_rejected_when_scanning_becomes_required(tmp_path, monkeypatch):
+    data = b"policy transition"
+    receipt = _receipt(tmp_path, data)
+    monkeypatch.setenv("UPLOAD_SCAN_MODE", "required")
+    assert not validate_cached_attachment(receipt, data, filename="notes.txt", user_id=1, workspace_id=2, attachment_dir=tmp_path / "attachments")
+
+
+def test_clean_receipt_remains_valid_when_scanning_is_required(tmp_path, monkeypatch):
+    data = b"clean receipt"
+    receipt = _receipt(tmp_path, data)
+    receipt["scan_status"] = "clean"
+    monkeypatch.setenv("UPLOAD_SCAN_MODE", "required")
+    assert validate_cached_attachment(receipt, data, filename="notes.txt", user_id=1, workspace_id=2, attachment_dir=tmp_path / "attachments")
+
+
+def test_skipped_receipt_is_rejected_in_production(tmp_path, monkeypatch):
+    data = b"production policy"
+    receipt = _receipt(tmp_path, data)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("UPLOAD_SCAN_MODE", "disabled")
+    assert not validate_cached_attachment(receipt, data, filename="notes.txt", user_id=1, workspace_id=2, attachment_dir=tmp_path / "attachments")
 
 
 def test_evidence_registration_rejects_mismatched_upload_receipt(tmp_path, monkeypatch):

@@ -23,7 +23,7 @@ from ai_service import (
     analyze_startup_idea, analyze_extracted_document, DocumentAnalysisResult, DocumentEvidenceClaim,
 )
 from document_extractor import extract_document_text, ExtractionResult
-from upload_security import secure_store_attachment, secure_register_evidence, remove_approved_attachment, UploadSecurityError, validate_upload, content_fingerprint, validate_cached_attachment
+from upload_security import secure_store_attachment, secure_register_evidence, UploadSecurityError, validate_upload, content_fingerprint, validate_cached_attachment
 from business_plan_generator import (
     BUSINESS_PLAN_SECTIONS, create_business_plan_docx, draft_business_plan_content,
 )
@@ -658,8 +658,6 @@ def render_evidence_registry(profile: dict[str, object], *, workspace_id: int | 
                                             **att_info,
                                         }, doc_upload.name, doc_bytes, user_id=user_id, workspace_id=workspace_id, db_path=DEFAULT_DB_PATH, existing_attachment=att_info)
                                     except Exception:
-                                        if att_info.get("attachment_path"):
-                                            remove_approved_attachment(att_info["attachment_path"])
                                         st.error("The evidence could not be registered.")
                                         continue
                                     claim.approval_status = STATUS_APPROVED

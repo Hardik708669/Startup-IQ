@@ -9,6 +9,8 @@ import subprocess
 import shutil
 import tempfile
 import os
+import urllib.error
+import urllib.request
 from io import BytesIO
 from pathlib import Path
 from docx import Document
@@ -47,7 +49,27 @@ server = subprocess.Popen(
      "--server.headless", "true", "--server.port", "8501"],
     cwd=str(ISOLATED_ROOT),
 )
-time.sleep(6)
+
+
+def wait_for_server(url: str, timeout: float = 30.0) -> None:
+    """Wait for Streamlit to accept HTTP connections, failing with context."""
+    deadline = time.monotonic() + timeout
+    last_error = "no response"
+    while time.monotonic() < deadline:
+        if server.poll() is not None:
+            raise RuntimeError(f"Streamlit exited before readiness check (exit {server.returncode}).")
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                if response.status < 500:
+                    print("[INIT] Streamlit server is ready.")
+                    return
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            last_error = str(error)
+        time.sleep(0.25)
+    raise RuntimeError(f"Streamlit server was not ready within {timeout:.0f}s: {last_error}")
+
+
+wait_for_server(APP_URL)
 
 try:
     with sync_playwright() as p:
@@ -72,6 +94,8 @@ try:
             accept_downloads=True,
         )
         page = context.new_page()
+        page.set_default_timeout(30000)
+        page.set_default_navigation_timeout(30000)
 
         def handle_console(msg):
             if msg.type == "error" and "favicon" not in msg.text.lower():

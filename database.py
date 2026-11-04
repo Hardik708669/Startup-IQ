@@ -887,10 +887,12 @@ def record_upload_security_event(upload_id: str, file_type: str, file_size: int,
         )
 
 
-def store_attachment(filename: str, data: bytes, attachment_dir: str | Path = DEFAULT_ATTACHMENT_DIR) -> tuple[str, str, int]:
-    """Compatibility wrapper; all storage now uses the secure upload pipeline."""
+def store_attachment(filename: str, data: bytes, attachment_dir: str | Path = DEFAULT_ATTACHMENT_DIR, *, db_path: str | Path, user_id: int, workspace_id: int) -> tuple[str, str, int]:
+    """Compatibility wrapper requiring ownership and scan-event persistence context."""
+    if db_path is None or user_id is None or workspace_id is None:
+        raise ValueError("Database, user, and workspace context are required for attachment storage.")
     from upload_security import secure_store_attachment
-    stored, original, size, _ = secure_store_attachment(filename, data, attachment_dir)
+    stored, original, size, _ = secure_store_attachment(filename, data, attachment_dir, db_path=db_path, user_id=user_id, workspace_id=workspace_id)
     return stored, original, size
 
 
