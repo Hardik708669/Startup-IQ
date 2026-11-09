@@ -20,7 +20,7 @@ from scoring import DIMENSIONS, calculate_assessment
 from dashboard import DISCLAIMER, dimension_rows, evidence_status_counts
 from recommendations import generate_recommendations
 from report_generator import generate_report, report_filename
-from ai_service import (
+from AI.ai_service import (
     EXTRACTION_SECTIONS, STATUS_APPROVED, STATUS_EDITED, STATUS_PENDING, STATUS_REJECTED,
     analyze_startup_idea, analyze_extracted_document, DocumentAnalysisResult, DocumentEvidenceClaim,
 )

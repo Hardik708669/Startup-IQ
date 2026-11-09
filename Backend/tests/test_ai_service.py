@@ -5,7 +5,7 @@ import os
 import unittest.mock as mock
 import pytest
 
-from ai_service import (
+from AI.ai_service import (
     AnalysisResult,
     ExtractedField,
     MissingInfoItem,
@@ -152,7 +152,7 @@ def test_ai_provider_network_and_timeout_fallbacks():
 
 def test_provider_success_records_safe_usage_metadata(monkeypatch):
     payload = {"fields": {}, "missing_info": [], "suggested_evidence": []}
-    monkeypatch.setattr("ai_service._call_openai_api", lambda *args, **kwargs: json.dumps(payload))
+    monkeypatch.setattr("AI.ai_service._call_openai_api", lambda *args, **kwargs: json.dumps(payload))
     result, error = analyze_startup_idea("A founder description", api_key="test-key", provider="openai")
     assert error is None
     assert result.provider_used == "openai"
@@ -166,7 +166,7 @@ def test_transient_provider_failures_are_retried_then_fallback(monkeypatch):
     def fail(*args, **kwargs):
         calls.append(1)
         raise TimeoutError("timeout")
-    monkeypatch.setattr("ai_service._call_openai_api", fail)
+    monkeypatch.setattr("AI.ai_service._call_openai_api", fail)
     result, error = analyze_startup_idea("A founder description", api_key="test-key", provider="openai")
     assert result.provider_used == "heuristic"
     assert "timed out" in error
@@ -175,7 +175,7 @@ def test_transient_provider_failures_are_retried_then_fallback(monkeypatch):
 
 def test_provider_supporting_excerpt_must_be_grounded(monkeypatch):
     payload = {"fields": {"startup_name": {"value": "X", "supporting_text": "not in source", "is_inferred": False}}, "missing_info": [], "suggested_evidence": []}
-    monkeypatch.setattr("ai_service._call_openai_api", lambda *args, **kwargs: json.dumps(payload))
+    monkeypatch.setattr("AI.ai_service._call_openai_api", lambda *args, **kwargs: json.dumps(payload))
     result, _ = analyze_startup_idea("X is a startup.", api_key="test-key", provider="openai")
     field = next(item for item in result.fields if item.field_key == "startup_name")
     assert field.supporting_text == ""

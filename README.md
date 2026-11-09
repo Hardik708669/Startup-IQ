@@ -34,7 +34,7 @@ The Evidence Inbox stores structured evidence separately from assessment ratings
 
 Verification statuses are **Not reviewed**, **Founder submitted**, **Reviewed by founder**, **Independently verified**, and **Needs follow-up**. These labels describe the submitted review state; Startup IQ does not independently verify claims. They are separate from the scoring classifications Supported information, Estimate, Unvalidated hypothesis, and Not yet known.
 
-Attachments may be PDF, DOCX, XLSX, CSV, TXT, PNG, JPG, or JPEG up to 10 MB. They are stored with UUID-generated filenames under the ignored local `data/attachments/` directory. Original filenames are metadata only, and attachment contents and private paths are not included in reports. Historical assessments store an immutable evidence snapshot; later edits or archiving do not rewrite history.
+Attachments may be PDF, DOCX, XLSX, CSV, TXT, PNG, JPG, or JPEG up to 10 MB. They are stored with UUID-generated filenames under the ignored local `Backend/data/attachments/` directory. Original filenames are metadata only, and attachment contents and private paths are not included in reports. Historical assessments store an immutable evidence snapshot; later edits or archiving do not rewrite history.
 
 ## Founder Document Generation (Phase 6)
 
@@ -65,7 +65,7 @@ Slides use a dark professional colour scheme with a cover gradient, white body s
 5. Click **Generate Business Plan (DOCX)** or **Generate Pitch Deck (PPTX)**.
 6. Click the **Download** button to save the file.
 
-Generated files are stored under `data/documents/workspace-<workspace-id>/` (gitignored), using UUID-backed filenames such as `business-plan-neurosync-<document-id>.docx` and `pitch-deck-neurosync-<document-id>.pptx`. The database record stores the owner, workspace, assessment, and relative file path. Documents are not shared merely because two workspaces use the same startup name; file access must resolve an ownership-scoped database record first. Version metadata is recorded in the local SQLite database and shown in the **Previously Generated Document Versions** panel.
+Generated files are stored under `Backend/data/documents/workspace-<workspace-id>/` (gitignored), using UUID-backed filenames such as `business-plan-neurosync-<document-id>.docx` and `pitch-deck-neurosync-<document-id>.pptx`. The database record stores the owner, workspace, assessment, and relative file path. Documents are not shared merely because two workspaces use the same startup name; file access must resolve an ownership-scoped database record first. Version metadata is recorded in the local SQLite database and shown in the **Previously Generated Document Versions** panel.
 
 Persisted documents are written to an exclusive temporary file, flushed, fsynced,
 validated, and published without replacing an existing final path. Database
@@ -99,13 +99,13 @@ python-docx >= 1.1.0
 python-pptx >= 1.0.0
 ```
 
-These are included in `requirements.txt`.
+These are included in `Backend/requirements.txt`.
 
 ### Running browser verification tests
 
 ```powershell
 python -m playwright install chromium
-python run_browser_verification.py
+python Backend/run_browser_verification.py
 ```
 
 The browser verification suite uses Playwright-managed Chromium by default. Set
@@ -119,7 +119,7 @@ Market Potential 20%, Problem & Solution Clarity 15%, Competitive Position 15%, 
 
 ## Stack and structure
 
-The project uses Python, Streamlit, Plotly, SQLite (`sqlite3`), `python-dotenv`, and pytest. `app.py` is the UI entry point; `scoring.py` owns the canonical rubric; `assessment.py` validates inputs; `dashboard.py` formats result data; `recommendations.py` provides deterministic guidance; `report_generator.py` creates HTML reports; and `database.py` stores local history. `docs/` contains scope and assessment specifications, `sample_data/` contains fictional data, and `tests/` contains automated tests.
+The project uses Python, Streamlit, Plotly, SQLite (`sqlite3`), `python-dotenv`, and pytest. `Backend/app.py` is the UI entry point; `Backend/scoring.py` owns the canonical rubric; `Backend/assessment.py` validates inputs; `Backend/dashboard.py` formats result data; `Backend/recommendations.py` provides deterministic guidance; `Backend/report_generator.py` creates HTML reports; and `Backend/database.py` stores local history. `AI/` contains provider integrations and heuristic analysis. Backend documentation, sample data, and automated tests live under `Backend/`.
 
 ## Development setup
 
@@ -133,8 +133,8 @@ normal work, or create one outside the repository for a clean validation run.
 py --version
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m pip install -r requirements-dev.txt
+python -m pip install -r Backend/requirements.txt
+python -m pip install -r Backend/requirements-dev.txt
 python -m playwright install chromium
 ```
 
@@ -144,8 +144,8 @@ python -m playwright install chromium
 python --version
 python -m venv .venv
 source .venv/Scripts/activate
-python -m pip install -r requirements.txt
-python -m pip install -r requirements-dev.txt
+python -m pip install -r Backend/requirements.txt
+python -m pip install -r Backend/requirements-dev.txt
 python -m playwright install chromium
 ```
 
@@ -156,7 +156,7 @@ Optional AI and authentication configuration can be created without secrets in
 the repository by copying `.env.example` to `.env`:
 
 ```powershell
-Copy-Item .env.example .env
+Copy-Item Backend/.env.example .env
 ```
 
 For production, set a strong `AUTH_JWT_SECRET`; do not use the development
@@ -242,31 +242,31 @@ still leave an orphan requiring reconciliation.
 Run the application:
 
 ```powershell
-python -m streamlit run app.py
+python -m streamlit run Backend/app.py
 ```
 
 Run tests:
 
 ```powershell
-python -m pytest -q
+python -m pytest -q Backend/tests
 ```
 
 Run browser verification:
 
 ```powershell
-python run_browser_verification.py
+python Backend/run_browser_verification.py
 ```
 
 To select Microsoft Edge instead of managed Chromium:
 
 ```powershell
 $env:PLAYWRIGHT_BROWSER = "msedge"
-python run_browser_verification.py
+python Backend/run_browser_verification.py
 ```
 
 ## Local persistence and history
 
-When a valid assessment is submitted, Startup IQ initializes and writes to `data/startup_iq.db`. It stores an immutable startup profile snapshot, assessment inputs, score, rubric version, all seven dimension results, evidence statuses, and recommendations. Identical profile and assessment inputs are idempotent, so Streamlit reruns do not create duplicate records.
+When a valid assessment is submitted, Startup IQ initializes and writes to `Backend/data/startup_iq.db`. It stores an immutable startup profile snapshot, assessment inputs, score, rubric version, all seven dimension results, evidence statuses, and recommendations. Identical profile and assessment inputs are idempotent, so Streamlit reruns do not create duplicate records.
 
 Use the **Assessment history** selector in the sidebar to open saved assessments and download historical reports. Selecting history does not overwrite the active assessment. History is local to this project and is not multi-user storage, cloud backup, or secure account isolation. The database contains user-generated startup information and must not be committed to Git.
 
@@ -276,10 +276,10 @@ Copy `.env.example` to `.env` only when optional future AI configuration is need
 
 ## Backup and recovery
 
-Startup IQ stores its SQLite database in `data/startup_iq.db`, uploaded attachments
-in `data/attachments/`, quarantine files in `data/quarantine/`, and generated
-DOCX/PPTX files in `data/documents/`. The default backup destination is the
-separate project-level `backups/` directory, outside the source data directory.
+Startup IQ stores its SQLite database in `Backend/data/startup_iq.db`, uploaded attachments
+in `Backend/data/attachments/`, quarantine files in `Backend/data/quarantine/`, and generated
+DOCX/PPTX files in `Backend/data/documents/`. The default backup destination is the
+separate `Backend/backups/` directory, outside the source data directory.
 These locations can be changed with `STARTUP_IQ_DB_PATH`,
 `STARTUP_IQ_ATTACHMENTS_DIR`, `STARTUP_IQ_QUARANTINE_DIR`,
 `STARTUP_IQ_DOCUMENTS_DIR`, and `STARTUP_IQ_BACKUPS_DIR`.
@@ -361,7 +361,7 @@ AUTH_JWT_SECRET=your-32-char-min-cryptographic-secret-here
 
 ### Registration & Login Instructions
 
-1. Start the app: `python -m streamlit run app.py`
+1. Start the app: `python -m streamlit run Backend/app.py`
 2. Navigate to the **📝 Create account** tab:
    - Enter Full Name, Email Address, and Password matching security rules.
    - Click **Create account**. A default personal workspace is automatically provisioned.
