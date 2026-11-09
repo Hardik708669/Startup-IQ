@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import time
 
-from ai_service import _call_gemini_api, _call_openai_api, parse_ai_json_response
+from AI.ai_service import _call_gemini_api, _call_openai_api, parse_ai_json_response
 
 
 def _run(name: str, key: str | None) -> None:

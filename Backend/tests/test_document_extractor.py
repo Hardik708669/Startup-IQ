@@ -12,7 +12,7 @@ from document_extractor import (
     ExtractionResult,
     DEFAULT_MAX_BYTES,
 )
-from ai_service import (
+from AI.ai_service import (
     analyze_extracted_document,
     heuristic_analyze_document,
     parse_document_analysis_json,
